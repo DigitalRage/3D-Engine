@@ -16,6 +16,7 @@ export class Editor {
             gl: renderer.gl,
             onSelect: mesh => this.select(mesh),
             onSelectFace: faceIndex => this.selectFace(faceIndex),
+            onSetPickMode: mode => this.gizmos.setPickMode(mode),
             onAddCube: () => this.addCube(),
             onAddFace: () => this.addFace(),
             onAddVertex: () => this.addVertex(),

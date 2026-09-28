@@ -8,6 +8,9 @@ export class Gizmos {
         this.lastX = 0;
         this.lastY = 0;
         this.moved = false;
+        this.pickMode = 'face';
+        this.activePick = null;
+        this.activeButton = 0;
         this.distance = Math.hypot(...camera.position);
         this.yaw = Math.atan2(camera.position[0], camera.position[2]);
         this.pitch = Math.asin(camera.position[1] / this.distance);
@@ -22,29 +25,60 @@ export class Gizmos {
         this.canvas.addEventListener('pointerdown', event => {
             if (event.button !== 0 && event.button !== 2) return;
             this.dragging = true;
+            this.activeButton = event.button;
             this.lastX = event.clientX;
             this.lastY = event.clientY;
             this.moved = false;
+            this.activePick = event.button === 0 ? this.pick(event.clientX, event.clientY) : null;
             this.canvas.setPointerCapture(event.pointerId);
         });
         this.canvas.addEventListener('pointermove', event => {
             if (!this.dragging) return;
-            this.moved = true;
-            this.yaw -= (event.clientX - this.lastX) * 0.01;
-            this.pitch = Math.max(-1.35, Math.min(1.35, this.pitch - (event.clientY - this.lastY) * 0.01));
+            const deltaX = event.clientX - this.lastX;
+            const deltaY = event.clientY - this.lastY;
+            this.moved = this.moved || Math.abs(deltaX) + Math.abs(deltaY) > 2;
+            if (this.activeButton === 0 && this.activePick && this.pickMode !== 'orbit') this.dragSelection(deltaX, deltaY);
+            else {
+                this.yaw -= deltaX * 0.01;
+                this.pitch = Math.max(-1.35, Math.min(1.35, this.pitch - deltaY * 0.01));
+            }
             this.lastX = event.clientX;
             this.lastY = event.clientY;
         });
         this.canvas.addEventListener('pointerup', event => {
             this.dragging = false;
             this.canvas.releasePointerCapture(event.pointerId);
-            if (!this.moved) this.pick(event.clientX, event.clientY);
+            if (!this.moved && this.activeButton === 0) this.pick(event.clientX, event.clientY);
+            this.activePick = null;
         });
         this.canvas.addEventListener('wheel', event => {
             event.preventDefault();
             this.distance = Math.max(1, Math.min(30, this.distance * Math.exp(event.deltaY * 0.001)));
         }, { passive: false });
         this.canvas.addEventListener('contextmenu', event => event.preventDefault());
+    }
+
+    setPickMode(mode) {
+        this.pickMode = mode;
+    }
+
+    dragSelection(deltaX, deltaY) {
+        const pick = this.activePick;
+        const amount = Math.max(1, this.distance) / Math.max(1, this.canvas.height) * 2;
+        if (this.pickMode === 'mesh') {
+            pick.mesh.position[0] += deltaX * amount;
+            pick.mesh.position[1] -= deltaY * amount;
+            return;
+        }
+        const vertices = this.pickMode === 'face'
+            ? pick.mesh.polygons[pick.faceIndex]
+            : [pick.mesh.polygons[pick.faceIndex][pick.vertexIndex]];
+        vertices.forEach(vertex => {
+            vertex[0] += deltaX * amount;
+            vertex[1] -= deltaY * amount;
+        });
+        if (this.pickMode === 'vertex') pick.mesh.weldNearbyVertices(pick.faceIndex, pick.vertexIndex);
+        pick.mesh.rebuildRenderData();
     }
 
     pick(clientX, clientY) {
@@ -66,9 +100,26 @@ export class Gizmos {
                 if (distance < (best?.distance ?? 0.18) && distance < 0.18) best = { mesh, faceIndex, distance, vertex: false };
             });
         }
-        if (!best) return;
+        if (!best && this.pickMode === 'mesh') {
+            let nearestMesh = null;
+            let nearestDistance = Infinity;
+            this.scene.meshes.forEach(mesh => {
+                const points = mesh.polygons.flat();
+                if (!points.length) return;
+                const center = points.reduce((sum, vertex) => sum.map((value, axis) => value + vertex[axis] / points.length), [0, 0, 0]);
+                const projected = this.project(center, mesh.getModelMatrix());
+                const distance = Math.hypot(projected[0] - x, projected[1] - y);
+                if (distance < nearestDistance) {
+                    nearestMesh = { mesh, faceIndex: 0, vertexIndex: 0, distance, vertex: false };
+                    nearestDistance = distance;
+                }
+            });
+            best = nearestMesh;
+        }
+        if (!best) return null;
         if (best.vertex) this.callbacks.onPickVertex?.(best.mesh, best.faceIndex, best.vertexIndex);
         else this.callbacks.onPickFace?.(best.mesh, best.faceIndex);
+        return best;
     }
 
     project(point, model) {

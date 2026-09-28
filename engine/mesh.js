@@ -70,8 +70,36 @@ export class Mesh {
 
     setFaceVertex(faceIndex, vertexIndex, position) {
         if (!this.polygons[faceIndex]?.[vertexIndex]) return;
-        this.polygons[faceIndex][vertexIndex] = [...position];
+        const previous = this.polygons[faceIndex][vertexIndex];
+        this.polygons.forEach(polygon => polygon.forEach((vertex, otherFace) => {
+            if (vertex === previous || Math.hypot(vertex[0] - previous[0], vertex[1] - previous[1], vertex[2] - previous[2]) < 0.0001) {
+                polygon[otherFace] = [...position];
+            }
+        }));
+        this.weldNearbyVertices(faceIndex, vertexIndex);
         this.rebuildRenderData();
+    }
+
+    weldNearbyVertices(faceIndex, vertexIndex, threshold = 0.08) {
+        const source = this.polygons[faceIndex]?.[vertexIndex];
+        if (!source) return;
+        let nearest = null;
+        let nearestDistance = threshold;
+        this.polygons.forEach((polygon, otherFace) => polygon.forEach((vertex, otherVertex) => {
+            if (otherFace === faceIndex && otherVertex === vertexIndex) return;
+            const distance = Math.hypot(vertex[0] - source[0], vertex[1] - source[1], vertex[2] - source[2]);
+            if (distance < nearestDistance) {
+                nearest = vertex;
+                nearestDistance = distance;
+            }
+        }));
+        if (nearest) {
+            this.polygons.forEach(polygon => polygon.forEach(vertex => {
+                if (Math.hypot(vertex[0] - source[0], vertex[1] - source[1], vertex[2] - source[2]) < threshold) {
+                    vertex.splice(0, 3, ...nearest);
+                }
+            }));
+        }
     }
 
     rebuildRenderData() {
