@@ -3,7 +3,7 @@ import { createInspectorPanel } from './panels/inspector.js';
 import { createAssetsPanel } from './panels/assets.js';
 
 export function createUI(root, options) {
-    const { scene, onSelect, onAddCube, onDelete, onResetCamera, onExport } = options;
+    const { scene, onSelect, onSelectFace, onAddCube, onDelete, onResetCamera, onExport } = options;
     root.style.pointerEvents = 'auto';
     root.innerHTML = '';
 
@@ -27,11 +27,19 @@ export function createUI(root, options) {
         .field-label { display: block; margin-bottom: 4px; color: #9aa9ba; font-size: 11px; text-transform: uppercase; }
         .vector-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
         .editor-input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid #3b526d; background: #101722; color: #e8edf5; padding: 5px; }
+        .face-title { margin: 0 0 8px; color: #ffd071; font-weight: 700; }
+        .face-buttons { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-bottom: 12px; }
+        .face-button { border: 1px solid #3b526d; background: #101722; color: #c8d4e2; padding: 5px 3px; cursor: pointer; font-size: 11px; }
+        .face-button:hover, .face-button.selected { background: #6a4e1c; border-color: #ffd071; color: #fff; }
         .color-row { display: flex; align-items: center; gap: 8px; }
         .color-input { width: 42px; height: 28px; border: 0; padding: 0; background: none; }
         @media (max-width: 700px) { .editor-panels { grid-template-columns: 1fr; max-height: 75vh; overflow-y: auto; } .editor-toolbar { flex-wrap: wrap; } .editor-title { width: 100%; } }
     `;
     root.appendChild(style);
+    window.addEventListener('keydown', event => {
+        if (event.key.toLowerCase() !== 'f' || ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+        root.style.display = root.style.display === 'none' ? '' : 'none';
+    });
 
     const container = document.createElement('div');
     container.className = 'editor-shell';
@@ -62,7 +70,7 @@ export function createUI(root, options) {
     container.appendChild(panels);
 
     const hierarchy = createHierarchyPanel(scene, onSelect);
-    const inspector = createInspectorPanel();
+    const inspector = createInspectorPanel(options.gl, onSelectFace);
     const assets = createAssetsPanel();
 
     panels.appendChild(hierarchy.element);
@@ -71,6 +79,7 @@ export function createUI(root, options) {
 
     return {
         setSelected: mesh => inspector.setMesh(mesh),
+        setFace: faceIndex => inspector.setFace(faceIndex),
         refreshHierarchy: hierarchy.refresh
     };
 }

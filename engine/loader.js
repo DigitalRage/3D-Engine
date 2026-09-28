@@ -1,7 +1,10 @@
 export async function loadTexture(url, gl) {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error('Failed to fetch texture: ' + url);
-    const blob = await resp.blob();
+    return loadTextureBlob(await resp.blob(), gl);
+}
+
+export async function loadTextureBlob(blob, gl) {
     const img = await createImageBitmap(blob);
 
     const tex = gl.createTexture();

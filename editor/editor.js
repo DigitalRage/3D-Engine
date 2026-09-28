@@ -12,7 +12,9 @@ export class Editor {
         this.uiRoot = document.getElementById('ui-root');
         this.ui = createUI(this.uiRoot, {
             scene,
+            gl: renderer.gl,
             onSelect: mesh => this.select(mesh),
+            onSelectFace: faceIndex => this.selectFace(faceIndex),
             onAddCube: () => this.addCube(),
             onDelete: () => this.deleteSelected(),
             onResetCamera: () => this.resetCamera(),
@@ -30,8 +32,15 @@ export class Editor {
 
     select(mesh) {
         this.selected = mesh;
+        if (mesh) mesh.selectedFace = mesh.selectedFace < 0 ? 0 : mesh.selectedFace;
         this.ui.setSelected(mesh);
         this.ui.refreshHierarchy();
+    }
+
+    selectFace(faceIndex) {
+        if (!this.selected) return;
+        this.selected.selectedFace = faceIndex;
+        this.ui.setFace(faceIndex);
     }
 
     addCube() {
@@ -61,7 +70,9 @@ export class Editor {
                 position: mesh.position,
                 rotation: mesh.rotation,
                 scale: mesh.scale,
-                color: mesh.material.color
+                color: mesh.material.color,
+                faceColors: mesh.faceColors,
+                faceUvTransforms: mesh.faceUvTransforms
             }))
         };
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });

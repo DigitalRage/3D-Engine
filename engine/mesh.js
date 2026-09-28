@@ -15,46 +15,46 @@ export class Mesh {
 
         this.vao = null;
         this.vaoExtension = null;
+        this.positionBuffer = null;
+        this.colorBuffer = null;
+        this.uvBuffer = null;
+        this.faceColors = [];
+        this.faceTextures = [];
+        this.faceUvTransforms = [];
+        this.faceCount = 0;
+        this.selectedFace = -1;
     }
 
     static createCube(material) {
         const mesh = new Mesh(material);
 
-        const v = [
-            // x, y, z
-            -0.5, -0.5,  0.5,
-             0.5, -0.5,  0.5,
-             0.5,  0.5,  0.5,
-            -0.5,  0.5,  0.5,
-            -0.5, -0.5, -0.5,
-             0.5, -0.5, -0.5,
-             0.5,  0.5, -0.5,
-            -0.5,  0.5, -0.5
+        const faces = [
+            [[-0.5,-0.5,0.5],[0.5,-0.5,0.5],[0.5,0.5,0.5],[-0.5,0.5,0.5]],
+            [[0.5,-0.5,-0.5],[-0.5,-0.5,-0.5],[-0.5,0.5,-0.5],[0.5,0.5,-0.5]],
+            [[-0.5,-0.5,-0.5],[-0.5,-0.5,0.5],[-0.5,0.5,0.5],[-0.5,0.5,-0.5]],
+            [[0.5,-0.5,0.5],[0.5,-0.5,-0.5],[0.5,0.5,-0.5],[0.5,0.5,0.5]],
+            [[-0.5,0.5,0.5],[0.5,0.5,0.5],[0.5,0.5,-0.5],[-0.5,0.5,-0.5]],
+            [[-0.5,-0.5,-0.5],[0.5,-0.5,-0.5],[0.5,-0.5,0.5],[-0.5,-0.5,0.5]]
         ];
-
-        const c = [
-            1,1,1,  1,1,1,  1,1,1,  1,1,1,
-            1,1,1,  1,1,1,  1,1,1,  1,1,1
-        ];
-
-        const u = [
-            0,0, 1,0, 1,1, 0,1,
-            0,0, 1,0, 1,1, 0,1
-        ];
-
-        const idx = [
-            0,1,2, 0,2,3,
-            4,5,6, 4,6,7,
-            0,4,7, 0,7,3,
-            1,5,6, 1,6,2,
-            3,2,6, 3,6,7,
-            0,1,5, 0,5,4
-        ];
+        const v = [];
+        const c = [];
+        const u = [];
+        const idx = [];
+        const faceUVs = [[0,0],[1,0],[1,1],[0,1]];
+        faces.forEach((face, faceIndex) => {
+            face.forEach((vertex, vertexIndex) => { v.push(...vertex); c.push(1,1,1); u.push(...faceUVs[vertexIndex]); });
+            const base = faceIndex * 4;
+            idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+        });
 
         mesh.vertices = new Float32Array(v);
         mesh.colors = new Float32Array(c);
         mesh.uvs = new Float32Array(u);
         mesh.indices = new Uint16Array(idx);
+        mesh.faceCount = faces.length;
+        mesh.faceColors = faces.map(() => [1, 1, 1]);
+        mesh.faceTextures = faces.map(() => null);
+        mesh.faceUvTransforms = faces.map(() => ({ scale: [1, 1], offset: [0, 0], rotation: 0 }));
 
         return mesh;
     }
@@ -80,18 +80,21 @@ export class Mesh {
         const aUV = gl.getAttribLocation(program, 'aUV');
 
         const vbo = gl.createBuffer();
+        this.positionBuffer = vbo;
         gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
         gl.bufferData(gl.ARRAY_BUFFER, this.vertices, gl.STATIC_DRAW);
         gl.enableVertexAttribArray(aPos);
         gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
 
         const cbo = gl.createBuffer();
+        this.colorBuffer = cbo;
         gl.bindBuffer(gl.ARRAY_BUFFER, cbo);
         gl.bufferData(gl.ARRAY_BUFFER, this.colors, gl.STATIC_DRAW);
         gl.enableVertexAttribArray(aColor);
         gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 0, 0);
 
         const ubo = gl.createBuffer();
+        this.uvBuffer = ubo;
         gl.bindBuffer(gl.ARRAY_BUFFER, ubo);
         gl.bufferData(gl.ARRAY_BUFFER, this.uvs, gl.STATIC_DRAW);
         gl.enableVertexAttribArray(aUV);
@@ -141,16 +144,44 @@ export class Mesh {
         }
 
         const uModel = gl.getUniformLocation(program, 'uModel');
+        const uColor = gl.getUniformLocation(program, 'uColor');
+        const uUseTexture = gl.getUniformLocation(program, 'uUseTexture');
+        const uTexture = gl.getUniformLocation(program, 'uTexture');
+        const uUVTransform = gl.getUniformLocation(program, 'uUVTransform');
+        const uUVRotation = gl.getUniformLocation(program, 'uUVRotation');
+        const uFaceSelected = gl.getUniformLocation(program, 'uFaceSelected');
         gl.uniformMatrix4fv(uModel, false, this.getModelMatrix());
-
-        this.material.bind(gl, program);
-
-        gl.drawElements(gl.TRIANGLES, this.indices.length, gl.UNSIGNED_SHORT, 0);
+        for (let faceIndex = 0; faceIndex < this.faceCount; faceIndex++) {
+            const color = this.faceColors[faceIndex] || this.material.color;
+            const texture = this.faceTextures[faceIndex];
+            const transform = this.faceUvTransforms[faceIndex];
+            gl.uniform3fv(uColor, new Float32Array(color));
+            gl.uniform1i(uUseTexture, texture ? 1 : 0);
+            gl.uniform1f(uFaceSelected, this.selectedFace === faceIndex ? 1 : 0);
+            gl.uniform4f(uUVTransform, transform.scale[0], transform.scale[1], transform.offset[0], transform.offset[1]);
+            gl.uniform1f(uUVRotation, transform.rotation);
+            if (texture) {
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, texture);
+                gl.uniform1i(uTexture, 0);
+            }
+            gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, faceIndex * 12);
+        }
 
         if (gl.createVertexArray) {
             gl.bindVertexArray(null);
         } else {
             this.vaoExtension.bindVertexArrayOES(null);
         }
+    }
+
+    updateGeometry(gl) {
+        if (!this.vao) return;
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, this.vertices, gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.colorBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, this.colors, gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.uvBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, this.uvs, gl.STATIC_DRAW);
     }
 }
