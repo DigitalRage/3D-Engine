@@ -1,4 +1,6 @@
 import { mat4 } from './mat4.js';
+import { Skeleton } from './skeleton.js';
+import { AnimationPlayer } from './animation.js';
 
 export class Mesh {
     constructor(material) {
@@ -23,12 +25,16 @@ export class Mesh {
         this.faceUvTransforms = [];
         this.faceCount = 0;
         this.selectedFace = -1;
+        this.polygons = [];
+        this.faceRanges = [];
+        this.skeleton = new Skeleton();
+        this.animationPlayer = new AnimationPlayer(this);
     }
 
     static createCube(material) {
         const mesh = new Mesh(material);
 
-        const faces = [
+        mesh.polygons = [
             [[-0.5,-0.5,0.5],[0.5,-0.5,0.5],[0.5,0.5,0.5],[-0.5,0.5,0.5]],
             [[0.5,-0.5,-0.5],[-0.5,-0.5,-0.5],[-0.5,0.5,-0.5],[0.5,0.5,-0.5]],
             [[-0.5,-0.5,-0.5],[-0.5,-0.5,0.5],[-0.5,0.5,0.5],[-0.5,0.5,-0.5]],
@@ -36,27 +42,73 @@ export class Mesh {
             [[-0.5,0.5,0.5],[0.5,0.5,0.5],[0.5,0.5,-0.5],[-0.5,0.5,-0.5]],
             [[-0.5,-0.5,-0.5],[0.5,-0.5,-0.5],[0.5,-0.5,0.5],[-0.5,-0.5,0.5]]
         ];
-        const v = [];
-        const c = [];
-        const u = [];
-        const idx = [];
-        const faceUVs = [[0,0],[1,0],[1,1],[0,1]];
-        faces.forEach((face, faceIndex) => {
-            face.forEach((vertex, vertexIndex) => { v.push(...vertex); c.push(1,1,1); u.push(...faceUVs[vertexIndex]); });
-            const base = faceIndex * 4;
-            idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
-        });
-
-        mesh.vertices = new Float32Array(v);
-        mesh.colors = new Float32Array(c);
-        mesh.uvs = new Float32Array(u);
-        mesh.indices = new Uint16Array(idx);
-        mesh.faceCount = faces.length;
-        mesh.faceColors = faces.map(() => [1, 1, 1]);
-        mesh.faceTextures = faces.map(() => null);
-        mesh.faceUvTransforms = faces.map(() => ({ scale: [1, 1], offset: [0, 0], rotation: 0 }));
+        mesh.rebuildRenderData();
 
         return mesh;
+    }
+
+    static createFromData(material, data) {
+        const mesh = new Mesh(material);
+        const vertices = data.vertices || [];
+        const faces = data.faces || [];
+        mesh.polygons = faces.map(face => face.map(index => [...vertices[index]]));
+        mesh.rebuildRenderData();
+        return mesh;
+    }
+
+    addVertex(faceIndex, position = [0, 0, 0]) {
+        if (!this.polygons[faceIndex]) this.polygons.push([]);
+        this.polygons[faceIndex].push([...position]);
+        this.rebuildRenderData();
+    }
+
+    addFace(vertices = [[0, 0, 0], [1, 0, 0], [0, 1, 0]]) {
+        this.polygons.push(vertices.map(vertex => [...vertex]));
+        this.rebuildRenderData();
+        this.selectedFace = this.polygons.length - 1;
+    }
+
+    setFaceVertex(faceIndex, vertexIndex, position) {
+        if (!this.polygons[faceIndex]?.[vertexIndex]) return;
+        this.polygons[faceIndex][vertexIndex] = [...position];
+        this.rebuildRenderData();
+    }
+
+    rebuildRenderData() {
+        const vertices = [];
+        const colors = [];
+        const uvs = [];
+        const indices = [];
+        this.faceRanges = [];
+        const faceUVs = [[0, 0], [1, 0], [1, 1], [0, 1]];
+        this.polygons.forEach((polygon, faceIndex) => {
+            const vertexStart = vertices.length / 3;
+            polygon.forEach((vertex, vertexIndex) => {
+                vertices.push(...vertex);
+                colors.push(1, 1, 1);
+                uvs.push(...faceUVs[vertexIndex % faceUVs.length]);
+            });
+            for (let vertexIndex = 1; vertexIndex < polygon.length - 1; vertexIndex++) {
+                indices.push(vertexStart, vertexStart + vertexIndex, vertexStart + vertexIndex + 1);
+            }
+            this.faceRanges.push({ offset: indices.length - Math.max(0, polygon.length - 2) * 3, count: Math.max(0, polygon.length - 2) * 3 });
+        });
+        this.vertices = new Float32Array(vertices);
+        this.colors = new Float32Array(colors);
+        this.uvs = new Float32Array(uvs);
+        this.indices = new Uint16Array(indices);
+        this.faceCount = this.polygons.length;
+        while (this.faceColors.length < this.faceCount) this.faceColors.push([1, 1, 1]);
+        while (this.faceTextures.length < this.faceCount) this.faceTextures.push(null);
+        while (this.faceUvTransforms.length < this.faceCount) this.faceUvTransforms.push({ scale: [1, 1], offset: [0, 0], rotation: 0 });
+        if (this.vao) this.invalidateBuffers();
+    }
+
+    invalidateBuffers() {
+        this.vao = null;
+        this.positionBuffer = null;
+        this.colorBuffer = null;
+        this.uvBuffer = null;
     }
 
     initBuffers(gl, program) {
@@ -165,7 +217,8 @@ export class Mesh {
                 gl.bindTexture(gl.TEXTURE_2D, texture);
                 gl.uniform1i(uTexture, 0);
             }
-            gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, faceIndex * 12);
+            const range = this.faceRanges[faceIndex];
+            gl.drawElements(gl.TRIANGLES, range.count, gl.UNSIGNED_SHORT, range.offset * 2);
         }
 
         if (gl.createVertexArray) {

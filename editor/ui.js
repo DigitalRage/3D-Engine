@@ -3,7 +3,7 @@ import { createInspectorPanel } from './panels/inspector.js';
 import { createAssetsPanel } from './panels/assets.js';
 
 export function createUI(root, options) {
-    const { scene, onSelect, onSelectFace, onAddCube, onDelete, onResetCamera, onExport } = options;
+    const { scene, onSelect, onSelectFace, onAddCube, onAddFace, onAddVertex, onAddBone, onPlayAnimation, onImportMesh, onDelete, onResetCamera, onExport } = options;
     root.style.pointerEvents = 'auto';
     root.innerHTML = '';
 
@@ -17,7 +17,7 @@ export function createUI(root, options) {
         .editor-button { border: 1px solid #3b526d; background: #1b2a3b; color: #e8edf5; padding: 6px 10px; cursor: pointer; border-radius: 3px; }
         .editor-button:hover { background: #29425c; }
         .editor-panels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-        .editor-panel { min-width: 0; padding: 10px; }
+        .editor-panel { min-width: 0; padding: 10px; max-height: calc(100vh - 105px); overflow: auto; scrollbar-width: thin; scrollbar-color: #526c88 #101722; }
         .panel-title { margin: 0 0 8px; color: #9ed8ff; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
         .hierarchy-list { list-style: none; padding: 0; margin: 0; }
         .hierarchy-item { padding: 6px 8px; cursor: pointer; border-radius: 3px; }
@@ -33,7 +33,7 @@ export function createUI(root, options) {
         .face-button:hover, .face-button.selected { background: #6a4e1c; border-color: #ffd071; color: #fff; }
         .color-row { display: flex; align-items: center; gap: 8px; }
         .color-input { width: 42px; height: 28px; border: 0; padding: 0; background: none; }
-        @media (max-width: 700px) { .editor-panels { grid-template-columns: 1fr; max-height: 75vh; overflow-y: auto; } .editor-toolbar { flex-wrap: wrap; } .editor-title { width: 100%; } }
+        @media (max-width: 700px) { .editor-panels { grid-template-columns: 1fr; } .editor-toolbar { flex-wrap: wrap; } .editor-title { width: 100%; } }
     `;
     root.appendChild(style);
     window.addEventListener('keydown', event => {
@@ -60,6 +60,10 @@ export function createUI(root, options) {
         toolbar.appendChild(element);
     };
     button('+ Cube', onAddCube);
+    button('+ Face', onAddFace);
+    button('+ Vertex', onAddVertex);
+    button('+ Bone', onAddBone);
+    button('Play', onPlayAnimation);
     button('Delete', onDelete);
     button('Reset View', onResetCamera);
     button('Export', onExport);
@@ -71,7 +75,7 @@ export function createUI(root, options) {
 
     const hierarchy = createHierarchyPanel(scene, onSelect);
     const inspector = createInspectorPanel(options.gl, onSelectFace);
-    const assets = createAssetsPanel();
+    const assets = createAssetsPanel(onImportMesh);
 
     panels.appendChild(hierarchy.element);
     panels.appendChild(inspector.element);

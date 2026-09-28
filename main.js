@@ -13,6 +13,7 @@ const camera = new Camera();
 camera.position = [0, 1.5, 4];
 
 let editor;
+let lastTime = performance.now();
 
 async function init() {
     await renderer.ready;
@@ -40,6 +41,9 @@ async function init() {
 }
 
 function loop() {
+    const now = performance.now();
+    scene.update(Math.min(0.1, (now - lastTime) / 1000));
+    lastTime = now;
     editor.update();
     renderer.render(scene, camera);
     requestAnimationFrame(loop);

@@ -68,17 +68,22 @@ export function createInspectorPanel(gl, onSelectFace) {
             return;
         }
 
+        const rigInfo = document.createElement('div');
+        rigInfo.className = 'inspector-empty';
+        rigInfo.textContent = `Rig: ${currentMesh.skeleton.bones.length} bone${currentMesh.skeleton.bones.length === 1 ? '' : 's'}${currentMesh.animationPlayer.playing ? ' - playing' : ''}`;
+        info.appendChild(rigInfo);
+
         const faceTitle = document.createElement('div');
         faceTitle.className = 'face-title';
-        faceTitle.textContent = `Editing ${faceNames[currentFace]} face`;
+        faceTitle.textContent = `Editing ${faceNames[currentFace] || `Face ${currentFace + 1}`} face`;
         info.appendChild(faceTitle);
         const faceButtons = document.createElement('div');
         faceButtons.className = 'face-buttons';
-        faceNames.forEach((faceName, index) => {
+        currentMesh.polygons.forEach((polygon, index) => {
             const button = document.createElement('button');
             button.className = 'face-button' + (index === currentFace ? ' selected' : '');
             button.type = 'button';
-            button.textContent = faceName;
+            button.textContent = faceNames[index] || `Face ${index + 1}`;
             button.addEventListener('click', () => {
                 currentFace = index;
                 onSelectFace(index);
@@ -88,8 +93,8 @@ export function createInspectorPanel(gl, onSelectFace) {
         });
         info.appendChild(faceButtons);
 
-        const base = currentFace * 12;
-        for (let vertexIndex = 0; vertexIndex < 4; vertexIndex++) {
+        const polygon = currentMesh.polygons[currentFace] || [];
+        polygon.forEach((vertexValue, vertexIndex) => {
             const vertex = document.createElement('div');
             vertex.className = 'field-group';
             const label = document.createElement('div');
@@ -99,21 +104,22 @@ export function createInspectorPanel(gl, onSelectFace) {
             const fields = document.createElement('div');
             fields.className = 'vector-fields';
             for (let axis = 0; axis < 3; axis++) {
-                const index = base + vertexIndex * 3 + axis;
+                const value = vertexValue[axis];
                 const input = document.createElement('input');
                 input.className = 'editor-input';
                 input.type = 'number';
                 input.step = '0.05';
-                input.value = currentMesh.vertices[index];
+                input.value = value;
                 input.addEventListener('input', () => {
-                    currentMesh.vertices[index] = Number(input.value) || 0;
-                    currentMesh.updateGeometry(gl);
+                    const vertex = [...currentMesh.polygons[currentFace][vertexIndex]];
+                    vertex[axis] = Number(input.value) || 0;
+                    currentMesh.setFaceVertex(currentFace, vertexIndex, vertex);
                 });
                 fields.appendChild(input);
             }
             vertex.appendChild(fields);
             info.appendChild(vertex);
-        }
+        });
 
         const name = document.createElement('input');
         name.className = 'editor-input field-group';

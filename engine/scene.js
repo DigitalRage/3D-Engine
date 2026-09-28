@@ -12,6 +12,6 @@ export class Scene {
     }
 
     update(dt) {
-        // For animations or logic later
+        this.meshes.forEach(mesh => mesh.animationPlayer?.update(dt));
     }
 }
