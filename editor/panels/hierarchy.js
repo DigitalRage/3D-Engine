@@ -1,4 +1,4 @@
-export function createHierarchyPanel(scene, onSelect) {
+export function createHierarchyPanel(scene, { onSelect, onDelete, onReorder, getSelected }) {
     const panel = document.createElement('div');
     panel.className = 'editor-panel';
 
@@ -15,9 +15,35 @@ export function createHierarchyPanel(scene, onSelect) {
         list.innerHTML = '';
         scene.meshes.forEach((mesh, i) => {
             const li = document.createElement('li');
-            li.className = 'hierarchy-item';
-            li.textContent = mesh.name || 'Mesh ' + i;
-            li.addEventListener('click', () => onSelect(mesh));
+            li.className = 'hierarchy-item' + (mesh === getSelected() ? ' selected' : '');
+            li.draggable = true;
+            li.dataset.meshIndex = String(i);
+            const name = document.createElement('button');
+            name.className = 'hierarchy-select';
+            name.type = 'button';
+            name.textContent = mesh.name || 'Mesh ' + i;
+            name.addEventListener('click', () => onSelect(mesh));
+            const remove = document.createElement('button');
+            remove.className = 'hierarchy-delete';
+            remove.type = 'button';
+            remove.textContent = '×';
+            remove.title = `Delete ${mesh.name || 'mesh'}`;
+            remove.setAttribute('aria-label', `Delete ${mesh.name || 'mesh'}`);
+            remove.addEventListener('click', () => onDelete(mesh));
+            li.addEventListener('dragstart', event => {
+                event.dataTransfer.setData('text/plain', String(i));
+                event.dataTransfer.effectAllowed = 'move';
+            });
+            li.addEventListener('dragover', event => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = 'move';
+            });
+            li.addEventListener('drop', event => {
+                event.preventDefault();
+                const fromIndex = Number(event.dataTransfer.getData('text/plain'));
+                if (Number.isInteger(fromIndex)) onReorder(scene.meshes[fromIndex], i);
+            });
+            li.append(name, remove);
             list.appendChild(li);
         });
     }

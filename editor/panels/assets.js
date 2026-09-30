@@ -1,4 +1,4 @@
-export function createAssetsPanel(onImportMesh) {
+export function createAssetsPanel(textureLibrary, onImportMesh, onImportTexture) {
     const panel = document.createElement('div');
     panel.className = 'editor-panel';
 
@@ -14,7 +14,7 @@ export function createAssetsPanel(onImportMesh) {
 
     const importLabel = document.createElement('label');
     importLabel.className = 'editor-button';
-    importLabel.textContent = 'Import mesh JSON';
+    importLabel.textContent = 'Import exported scene or mesh';
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.json,application/json';
@@ -23,5 +23,45 @@ export function createAssetsPanel(onImportMesh) {
     importLabel.appendChild(input);
     panel.appendChild(importLabel);
 
-    return panel;
+    const textureTitle = document.createElement('div');
+    textureTitle.className = 'panel-title asset-section-title';
+    textureTitle.textContent = 'Image library';
+    panel.appendChild(textureTitle);
+
+    const textureList = document.createElement('div');
+    textureList.className = 'asset-list';
+    panel.appendChild(textureList);
+
+    const textureLabel = document.createElement('label');
+    textureLabel.className = 'editor-button';
+    textureLabel.textContent = 'Add image';
+    const textureInput = document.createElement('input');
+    textureInput.type = 'file';
+    textureInput.accept = 'image/*';
+    textureInput.multiple = true;
+    textureInput.style.display = 'none';
+    textureInput.addEventListener('change', async () => {
+        for (const file of textureInput.files) await onImportTexture(file);
+        textureInput.value = '';
+        refresh();
+    });
+    textureLabel.appendChild(textureInput);
+    panel.appendChild(textureLabel);
+
+    function refresh() {
+        textureList.innerHTML = '';
+        if (!textureLibrary.assets.length) {
+            textureList.textContent = 'No images loaded.';
+            return;
+        }
+        textureLibrary.assets.forEach(asset => {
+            const item = document.createElement('div');
+            item.className = 'asset-item';
+            item.textContent = asset.name;
+            textureList.appendChild(item);
+        });
+    }
+    refresh();
+
+    return { element: panel, refresh };
 }

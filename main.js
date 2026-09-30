@@ -14,6 +14,9 @@ camera.position = [0, 1.5, 4];
 
 let editor;
 let lastTime = performance.now();
+let fpsWindowStart = lastTime;
+let measuredFrames = 0;
+let measuredWorkMs = 0;
 
 async function init() {
     await renderer.ready;
@@ -37,16 +40,34 @@ async function init() {
     scene.add(cube);
 
     editor = new Editor(scene, camera, renderer);
+    if (tex) editor.textureLibrary.addTexture('example.webp', tex, './assets/textures/example.webp');
+    editor.ui.refreshTextures();
     loop();
 }
 
 function loop() {
     const now = performance.now();
+    const workStart = performance.now();
     scene.update(Math.min(0.1, (now - lastTime) / 1000));
     lastTime = now;
     editor.update();
     renderer.render(scene, camera);
+    measuredWorkMs += performance.now() - workStart;
+    measuredFrames++;
+    const windowElapsed = performance.now() - fpsWindowStart;
+    if (windowElapsed >= 250) {
+        editor.ui.setInternalFps(measuredFrames * 1000 / measuredWorkMs, measuredWorkMs / measuredFrames);
+        measuredFrames = 0;
+        measuredWorkMs = 0;
+        fpsWindowStart = performance.now();
+    }
     requestAnimationFrame(loop);
 }
 
-init();
+init().catch(error => {
+    console.error('Editor startup failed:', error);
+    const message = document.createElement('pre');
+    message.textContent = `Editor startup failed\n${error.message || error}`;
+    message.style.cssText = 'position:fixed;left:16px;bottom:16px;max-width:calc(100vw - 32px);padding:12px;margin:0;color:#ffd8d8;background:#3a171d;border:1px solid #b85c68;font:13px/1.4 monospace;white-space:pre-wrap;z-index:10;';
+    document.body.appendChild(message);
+});
