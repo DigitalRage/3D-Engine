@@ -4,6 +4,7 @@ import { traceDirectionalShadowFaces } from './raytracing.js';
 export class Renderer {
     constructor(canvas) {
         this.canvas = canvas;
+        this.overlayCanvas = document.getElementById('viewport-overlay');
         this.gl = canvas.getContext('webgl');
         if (!this.gl) throw new Error('WebGL not supported');
         this.instancingExtension = this.gl.getExtension('ANGLE_instanced_arrays');
@@ -17,6 +18,8 @@ export class Renderer {
         this.program = null;
         this.boneBuffer = null;
         this.frameId = 0;
+        this.renderMode = 'anime';
+        this.frameStats = { drawCalls: 0, triangles: 0, objects: 0 };
         this.uniforms = null;
         this.shadowSignature = null;
         this.ready = this.initProgram();
@@ -78,7 +81,16 @@ export class Renderer {
     resize() {
         this.canvas.width = window.innerWidth;
         this.canvas.height = window.innerHeight;
+        if (this.overlayCanvas) {
+            this.overlayCanvas.width = window.innerWidth;
+            this.overlayCanvas.height = window.innerHeight;
+        }
         this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    }
+
+    setRenderMode(mode) {
+        if (!['wireframe', 'solid', 'material', 'anime'].includes(mode)) throw new RangeError(`Unknown render mode: ${mode}`);
+        this.renderMode = mode;
     }
 
     render(scene, camera) {
@@ -91,6 +103,11 @@ export class Renderer {
 
         gl.useProgram(this.program);
         const frameId = ++this.frameId;
+        const stats = {
+            drawCalls: 0,
+            triangles: 0,
+            objects: scene.meshes.length
+        };
 
         const view = camera.getViewMatrix();
         const proj = camera.getProjectionMatrix(this.canvas.width / this.canvas.height);
@@ -107,8 +124,8 @@ export class Renderer {
             gl.uniform1f(this.uniforms.uLightThreshold, light.threshold);
             gl.uniform3fv(this.uniforms.uShadeColor, new Float32Array(light.shadeColor));
         }
-        const shadowSignature = makeShadowSignature(scene);
-        if (shadowSignature !== this.shadowSignature) {
+        const shadowSignature = this.renderMode === 'anime' ? makeShadowSignature(scene) : null;
+        if (this.renderMode === 'anime' && shadowSignature !== this.shadowSignature) {
             const tracedShadows = traceDirectionalShadowFaces(scene, light);
             scene.meshes.forEach(mesh => {
                 const next = tracedShadows.get(mesh) || Array(mesh.faceCount).fill(false);
@@ -119,6 +136,15 @@ export class Renderer {
                 }
             });
             this.shadowSignature = shadowSignature;
+        } else if (this.renderMode !== 'anime') {
+            this.shadowSignature = null;
+        }
+
+        if (this.renderMode === 'wireframe') {
+            stats.triangles = scene.meshes.reduce((sum, mesh) => sum + mesh.triangleCount, 0);
+            scene.meshes.forEach(mesh => mesh.draw(gl, this.program, null, frameId, this.renderMode, stats));
+            this.frameStats = stats;
+            return;
         }
 
         const transparentFaces = [];
@@ -145,11 +171,11 @@ export class Renderer {
 
         gl.depthMask(true);
         for (const meshes of instanceGroups.values()) {
-            if (meshes.length > 1) this.drawInstancedMeshes(meshes, frameId);
+            if (meshes.length > 1) this.drawInstancedMeshes(meshes, frameId, stats);
             else opaqueMeshes.push(meshes[0]);
         }
         for (const mesh of opaqueMeshes) {
-            mesh.draw(gl, this.program, mesh.opaqueFaceIndices, frameId);
+            mesh.draw(gl, this.program, mesh.opaqueFaceIndices, frameId, this.renderMode, stats);
         }
         if (transparentFaces.length) {
             gl.enable(gl.BLEND);
@@ -157,15 +183,16 @@ export class Renderer {
             transparentFaces.sort((a, b) => b.distance - a.distance);
             gl.depthMask(false);
             for (const face of transparentFaces) {
-                face.mesh.draw(gl, this.program, [face.faceIndex], frameId);
+                face.mesh.draw(gl, this.program, [face.faceIndex], frameId, this.renderMode, stats);
             }
             gl.depthMask(true);
             gl.disable(gl.BLEND);
         }
-        this.drawSkeletons(scene);
+        this.drawSkeletons(scene, stats);
+        this.frameStats = stats;
     }
 
-    drawInstancedMeshes(meshes, frameId) {
+    drawInstancedMeshes(meshes, frameId, stats) {
         const gl = this.gl;
         const extension = this.instancingExtension;
         const template = meshes[0];
@@ -185,7 +212,7 @@ export class Renderer {
         });
         gl.uniformMatrix4fv(this.uniforms.uModel, false, identityMatrix());
         gl.uniform1f(this.uniforms.uInstanced, 1);
-        gl.uniform1f(this.uniforms.uToonShading, template.material.shading === 'toon' ? 1 : 0);
+        gl.uniform1f(this.uniforms.uToonShading, this.renderMode === 'anime' && template.material.shading === 'toon' ? 1 : 0);
 
         if (template.vertexWeights.size && template.skinningFrame !== frameId) {
             gl.bindBuffer(gl.ARRAY_BUFFER, template.positionBuffer);
@@ -204,6 +231,8 @@ export class Renderer {
             gl.uniform1f(uniforms.uUVRotation, batch.transform.rotation);
             gl.uniform2f(uniforms.uUVCenter, batch.uvCenter[0], batch.uvCenter[1]);
             extension.drawElementsInstancedANGLE(gl.TRIANGLES, batch.count, gl.UNSIGNED_SHORT, batch.offset * 2, meshes.length);
+            stats.drawCalls++;
+            stats.triangles += batch.count / 3 * meshes.length;
         });
 
         this.uniforms.aInstance.forEach(attribute => {
@@ -215,7 +244,7 @@ export class Renderer {
         else template.vaoExtension.bindVertexArrayOES(null);
     }
 
-    drawSkeletons(scene) {
+    drawSkeletons(scene, stats) {
         const gl = this.gl;
         const lineData = [];
         scene.meshes.forEach(mesh => {
@@ -259,6 +288,7 @@ export class Renderer {
         gl.uniform1f(this.uniforms.uUVRotation, 0);
         gl.uniform2f(this.uniforms.uUVCenter, 0.5, 0.5);
         gl.drawArrays(gl.LINES, 0, lineData.length / 6);
+        stats.drawCalls++;
         gl.depthMask(true);
         gl.enable(gl.DEPTH_TEST);
     }

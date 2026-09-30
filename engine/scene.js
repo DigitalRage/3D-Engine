@@ -2,6 +2,8 @@ import { DirectionalLight } from './light.js';
 
 export class Scene {
     constructor() {
+        this.name = 'Untitled Scene';
+        this.assetId = null;
         this.meshes = [];
         this.light = new DirectionalLight();
     }

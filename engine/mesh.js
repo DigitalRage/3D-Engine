@@ -30,7 +30,9 @@ export class Mesh {
         this.faceUvs = [];
         this.textureAssetId = null;
         this.faceCount = 0;
+        this.triangleCount = 0;
         this.selectedFace = -1;
+        this.wireframeIndices = new Uint16Array();
         this.selectedVertex = null;
         this.selectedBone = null;
         this.vertexWeights = new Map();
@@ -40,7 +42,15 @@ export class Mesh {
         this.uniformLocations = null;
         this.uniformProgram = null;
         this.skinningFrame = null;
-        this.polygons = [];
+        this.positions = [];
+        this.faces = [];
+        this.edges = [];
+        this.facesOfEdge = new Map();
+        this.edgesOfVertex = [];
+        this._polygonViews = [];
+        this._polygonProxy = null;
+        this._legacyViewExposed = false;
+        this.vertexIndexByPosition = new WeakMap();
         this.faceRanges = [];
         this.opaqueFaceIndices = [];
         this.transparentFaceIndices = [];
@@ -51,6 +61,147 @@ export class Mesh {
         this.instanceBatchKey = null;
         this.skeleton = new Skeleton();
         this.animationPlayer = new AnimationPlayer(this);
+        this._setPolygonViews([]);
+    }
+
+    get polygons() {
+        return this._polygonProxy;
+    }
+
+    set polygons(value) {
+        this._setPolygonViews(Array.isArray(value) ? value : []);
+        this._legacyViewExposed = true;
+    }
+
+    _setPolygonViews(polygons) {
+        const wrapFace = face => new Proxy(face, {
+            set: (target, property, value, receiver) => {
+                this._legacyViewExposed = true;
+                return Reflect.set(target, property, value, receiver);
+            },
+            deleteProperty: (target, property) => {
+                this._legacyViewExposed = true;
+                return Reflect.deleteProperty(target, property);
+            }
+        });
+        this._polygonViews = polygons.map(wrapFace);
+        this._polygonProxy = new Proxy(this._polygonViews, {
+            set: (target, property, value, receiver) => {
+                this._legacyViewExposed = true;
+                return Reflect.set(target, property, Array.isArray(value) ? wrapFace(value) : value, receiver);
+            },
+            deleteProperty: (target, property) => {
+                this._legacyViewExposed = true;
+                return Reflect.deleteProperty(target, property);
+            }
+        });
+    }
+
+    setTopology(positions = [], faces = []) {
+        this.positions = positions.map(position => [...position]);
+        this.faces = faces.map(face => [...face]);
+        this._refreshPolygonViews();
+    }
+
+    getVertexIndex(vertex) {
+        if (Number.isInteger(vertex)) return vertex >= 0 && vertex < this.positions.length ? vertex : -1;
+        if (Array.isArray(vertex)) return this.vertexIndexByPosition.get(vertex) ?? this.positions.findIndex(position => position === vertex);
+        return -1;
+    }
+
+    getVertexSkin(vertex) {
+        const index = this.getVertexIndex(vertex);
+        return index < 0 ? undefined : this.vertexWeights.get(index);
+    }
+
+    _refreshPolygonViews() {
+        this.vertexIndexByPosition = new WeakMap();
+        this.positions.forEach((position, index) => this.vertexIndexByPosition.set(position, index));
+        this._setPolygonViews(this.faces.map(face => face.map(vertexIndex => this.positions[vertexIndex])));
+        this._legacyViewExposed = false;
+    }
+
+    _syncTopologyFromPolygonViews(weldThreshold = 0.0001) {
+        const priorSkinByPosition = new Map();
+        this.positions.forEach((position, index) => {
+            const skin = this.vertexWeights.get(index);
+            if (skin) priorSkinByPosition.set(position, skin);
+        });
+
+        const positions = [];
+        const faces = [];
+        const indicesByIdentity = new Map();
+        const indicesByPosition = new Map();
+        const skinByIndex = new Map();
+        const positionCell = vertex => vertex.map(value => Math.floor(value / weldThreshold));
+        const cellKey = cell => cell.join(',');
+        const attachSkin = (vertexIndex, skin) => {
+            if (!skin) return;
+            const attached = skinByIndex.get(vertexIndex);
+            if (!attached) skinByIndex.set(vertexIndex, skin);
+            else if (attached !== skin) skin.weights.forEach((weight, bone) => attached.weights.set(bone, Math.max(attached.weights.get(bone) || 0, weight)));
+        };
+        for (const polygon of this._polygonViews) {
+            const face = [];
+            for (const vertex of polygon) {
+                let vertexIndex = indicesByIdentity.get(vertex);
+                if (vertexIndex === undefined) {
+                    const cell = positionCell(vertex);
+                    for (let x = -1; x <= 1 && vertexIndex === undefined; x++) {
+                        for (let y = -1; y <= 1 && vertexIndex === undefined; y++) {
+                            for (let z = -1; z <= 1 && vertexIndex === undefined; z++) {
+                                const candidates = indicesByPosition.get(cellKey([cell[0] + x, cell[1] + y, cell[2] + z])) || [];
+                                vertexIndex = candidates.find(candidate => Math.hypot(...positions[candidate].map((value, axis) => value - vertex[axis])) <= weldThreshold);
+                            }
+                        }
+                    }
+                    if (vertexIndex === undefined) {
+                        vertexIndex = positions.length;
+                        positions.push(vertex);
+                        const key = cellKey(cell);
+                        if (!indicesByPosition.has(key)) indicesByPosition.set(key, []);
+                        indicesByPosition.get(key).push(vertexIndex);
+                    }
+                    indicesByIdentity.set(vertex, vertexIndex);
+                }
+                attachSkin(vertexIndex, priorSkinByPosition.get(vertex));
+                face.push(vertexIndex);
+            }
+            faces.push(face);
+        }
+        this.positions = positions;
+        this.faces = faces;
+        this.vertexWeights = skinByIndex;
+        this._refreshPolygonViews();
+    }
+
+    _rebuildTopologyAdjacency() {
+        this.edges = [];
+        this.facesOfEdge = new Map();
+        this.edgesOfVertex = Array.from({ length: this.positions.length }, () => []);
+        const edgesByKey = new Map();
+        this.faces.forEach((face, faceIndex) => {
+            for (let corner = 0; corner < face.length; corner++) {
+                const a = face[corner];
+                const b = face[(corner + 1) % face.length];
+                if (a === b) continue;
+                const key = a < b ? `${a},${b}` : `${b},${a}`;
+                let adjacentFaces = this.facesOfEdge.get(key);
+                if (!adjacentFaces) {
+                    const edge = { a: Math.min(a, b), b: Math.max(a, b), faceA: faceIndex };
+                    edgesByKey.set(key, edge);
+                    this.edges.push(edge);
+                    this.edgesOfVertex[a].push(key);
+                    this.edgesOfVertex[b].push(key);
+                    adjacentFaces = [];
+                    this.facesOfEdge.set(key, adjacentFaces);
+                } else {
+                    const edge = edgesByKey.get(key);
+                    if (edge && edge.faceB === undefined) edge.faceB = faceIndex;
+                }
+                adjacentFaces.push(faceIndex);
+            }
+        });
     }
 
     static createCube(material) {
@@ -126,28 +277,42 @@ export class Mesh {
         const mesh = new Mesh(material);
         const vertices = data.vertices || [];
         const faces = data.faces || [];
-        mesh.polygons = faces.map(face => face.map(index => [...vertices[index]]));
+        mesh.setTopology(vertices, faces);
         mesh.rebuildRenderData();
         return mesh;
     }
 
     addVertex(faceIndex, position = [0, 0, 0]) {
-        if (!this.polygons[faceIndex]) this.polygons.push([]);
-        this.polygons[faceIndex].push([...position]);
+        if (!this.faces[faceIndex]) {
+            faceIndex = this.faces.length;
+            this.faces.push([]);
+        }
+        const vertexIndex = this.positions.length;
+        this.positions.push([...position]);
+        this.faces[faceIndex].push(vertexIndex);
+        this._refreshPolygonViews();
         this.rebuildRenderData();
+        return vertexIndex;
     }
 
     addFace(vertices = [[0, 0, 0], [1, 0, 0], [0, 1, 0]]) {
-        this.polygons.push(vertices.map(vertex => [...vertex]));
+        const face = vertices.map(vertex => {
+            const vertexIndex = this.positions.length;
+            this.positions.push([...vertex]);
+            return vertexIndex;
+        });
+        this.faces.push(face);
+        this._refreshPolygonViews();
         this.rebuildRenderData();
-        this.selectedFace = this.polygons.length - 1;
+        this.selectedFace = this.faces.length - 1;
     }
 
     extrudeFace(faceIndex, distance = 0.5) {
-        const face = this.polygons[faceIndex];
+        const face = this.faces[faceIndex];
         if (!face || face.length < 3) return;
-        const edgeA = face[1].map((value, axis) => value - face[0][axis]);
-        const edgeB = face[2].map((value, axis) => value - face[0][axis]);
+        const positions = face.map(vertexIndex => this.positions[vertexIndex]);
+        const edgeA = positions[1].map((value, axis) => value - positions[0][axis]);
+        const edgeB = positions[2].map((value, axis) => value - positions[0][axis]);
         const normal = [
             edgeA[1] * edgeB[2] - edgeA[2] * edgeB[1],
             edgeA[2] * edgeB[0] - edgeA[0] * edgeB[2],
@@ -156,15 +321,20 @@ export class Mesh {
         const normalLength = Math.hypot(...normal);
         if (!normalLength) return;
         const offset = normal.map(value => value / normalLength * distance);
-        const extrudedFace = face.map(vertex => vertex.map((value, axis) => value + offset[axis]));
+        const extrudedFace = positions.map(vertex => {
+            const vertexIndex = this.positions.length;
+            this.positions.push(vertex.map((value, axis) => value + offset[axis]));
+            return vertexIndex;
+        });
 
         for (let index = 0; index < face.length; index++) {
             const next = (index + 1) % face.length;
-            this.polygons.push([face[index], face[next], extrudedFace[next], extrudedFace[index]]);
+            this.faces.push([face[index], face[next], extrudedFace[next], extrudedFace[index]]);
         }
-        this.polygons.push(extrudedFace);
+        this.faces.push(extrudedFace);
+        this._refreshPolygonViews();
         this.rebuildRenderData();
-        this.selectedFace = this.polygons.length - 1;
+        this.selectedFace = this.faces.length - 1;
     }
 
     moveFaceUVs(faceIndex, deltaU, deltaV) {
@@ -242,6 +412,298 @@ export class Mesh {
         return { vertices, center, tangent, bitangent, normal };
     }
 
+    knifeTool(faceIndex, start, end) {
+        const polygon = this.polygons[faceIndex];
+        if (!polygon || polygon.length < 3 || !start || !end) return false;
+        const frame = this.getFaceFrame(faceIndex);
+        if (!frame) return false;
+        const normal = normalize3(frame.normal) || [0, 0, 1];
+        const center = frame.center;
+        const projectedStart = projectToPlane(start, center, normal);
+        const projectedEnd = projectToPlane(end, center, normal);
+        const points = [...polygon];
+        for (let index = 0; index < polygon.length; index++) {
+            const current = polygon[index];
+            const next = polygon[(index + 1) % polygon.length];
+            const intersection = segmentToSegmentIntersection(projectedStart, projectedEnd, current, next);
+            if (intersection) points.splice(index + 1, 0, intersection);
+        }
+        if (points.length === polygon.length) return false;
+        const left = [];
+        const right = [];
+        for (const point of points) {
+            const signed = dot3(point.map((value, axis) => value - center[axis]), normal);
+            if (signed >= 0) left.push([...point]);
+            else right.push([...point]);
+        }
+        const leftFace = left.length >= 3 ? left : null;
+        const rightFace = right.length >= 3 ? right : null;
+        if (!leftFace && !rightFace) return false;
+        const replacement = [];
+        const replacementUvs = [];
+        if (leftFace) {
+            replacement.push(leftFace);
+            replacementUvs.push(leftFace.map((_, vertexIndex) => this.faceUvs[faceIndex]?.[Math.min(vertexIndex, this.faceUvs[faceIndex].length - 1)] || defaultFaceUV(this.polygons.length, vertexIndex, 1)));
+        }
+        if (rightFace) {
+            replacement.push(rightFace);
+            replacementUvs.push(rightFace.map((_, vertexIndex) => this.faceUvs[faceIndex]?.[Math.min(vertexIndex, this.faceUvs[faceIndex].length - 1)] || defaultFaceUV(this.polygons.length, vertexIndex, 1)));
+        }
+        const oldColor = this.faceColors[faceIndex] || [1, 1, 1, 1];
+        this.polygons.splice(faceIndex, 1, ...replacement);
+        this.faceUvs.splice(faceIndex, 1, ...replacementUvs);
+        this.faceColors.splice(faceIndex, 1, ...replacement.map(() => [...oldColor]));
+        this.faceTextures.splice(faceIndex, 1, ...replacement.map(() => this.faceTextures[faceIndex] || null));
+        this.faceTextureIds.splice(faceIndex, 1, ...replacement.map(() => this.faceTextureIds[faceIndex] || null));
+        this.faceUvTransforms.splice(faceIndex, 1, ...replacement.map(() => ({ ...this.faceUvTransforms[faceIndex] })));
+        this.rebuildRenderData();
+        return true;
+    }
+
+    bevel(faceIndex, amount = 0.1) {
+        const polygon = this.polygons[faceIndex];
+        if (!polygon || polygon.length < 3) return false;
+        const frame = this.getFaceFrame(faceIndex);
+        if (!frame) return false;
+        const offsetNormal = normalize3(frame.normal) || [0, 0, 1];
+        const offsetPolygon = polygon.map(point => point.map((value, axis) => value + offsetNormal[axis] * amount));
+        const sideFaces = polygon.map((vertex, index) => [
+            [...vertex],
+            [...polygon[(index + 1) % polygon.length]],
+            [...offsetPolygon[(index + 1) % polygon.length]],
+            [...offsetPolygon[index]]
+        ]);
+        this.polygons.splice(faceIndex, 1, ...sideFaces, offsetPolygon);
+        const faceUv = this.faceUvs[faceIndex] || polygon.map((_, vertexIndex) => defaultFaceUV(faceIndex, vertexIndex, polygon.length));
+        const newUvs = sideFaces.map((_, sideIndex) => [
+            [...faceUv[Math.min(sideIndex, faceUv.length - 1)]],
+            [...faceUv[Math.min((sideIndex + 1) % faceUv.length, faceUv.length - 1)]],
+            [...faceUv[Math.min((sideIndex + 1) % faceUv.length, faceUv.length - 1)]],
+            [...faceUv[Math.min(sideIndex, faceUv.length - 1)]]
+        ]);
+        this.faceUvs.splice(faceIndex, 1, ...newUvs, offsetPolygon.map((_, vertexIndex) => [...faceUv[vertexIndex % faceUv.length]]));
+        this.faceColors.splice(faceIndex, 1, ...sideFaces.map(() => [...(this.faceColors[faceIndex] || [1, 1, 1, 1])]), [...(this.faceColors[faceIndex] || [1, 1, 1, 1])]);
+        this.faceTextures.splice(faceIndex, 1, ...sideFaces.map(() => this.faceTextures[faceIndex] || null), this.faceTextures[faceIndex] || null);
+        this.faceTextureIds.splice(faceIndex, 1, ...sideFaces.map(() => this.faceTextureIds[faceIndex] || null), this.faceTextureIds[faceIndex] || null);
+        this.faceUvTransforms.splice(faceIndex, 1, ...sideFaces.map(() => ({ ...this.faceUvTransforms[faceIndex] })), { ...this.faceUvTransforms[faceIndex] });
+        this.rebuildRenderData();
+        return true;
+    }
+
+    inset(faceIndex, amount = 0.2) {
+        const polygon = this.polygons[faceIndex];
+        if (!polygon || polygon.length < 3) return false;
+        const frame = this.getFaceFrame(faceIndex); if (!frame) return false;
+        const center = frame.center;
+        const insetPolygon = polygon.map(vertex => {
+            const offset = vertex.map((value, axis) => value - center[axis]);
+            const direction = normalize3(offset) || [1, 0, 0];
+            return center.map((value, axis) => value + direction[axis] * amount + (vertex[axis] - center[axis]) * (1 - amount));
+        });
+        this.polygons.splice(faceIndex, 1, insetPolygon);
+        this.faceUvs.splice(faceIndex, 1, insetPolygon.map((_, vertexIndex) => this.faceUvs[faceIndex]?.[vertexIndex] || defaultFaceUV(faceIndex, vertexIndex, insetPolygon.length)));
+        this.faceColors.splice(faceIndex, 1, [this.faceColors[faceIndex] || [1, 1, 1, 1]]);
+        this.faceTextures.splice(faceIndex, 1, [this.faceTextures[faceIndex] || null]);
+        this.faceTextureIds.splice(faceIndex, 1, [this.faceTextureIds[faceIndex] || null]);
+        this.faceUvTransforms.splice(faceIndex, 1, [{ ...this.faceUvTransforms[faceIndex] }]);
+        this.rebuildRenderData();
+        return true;
+    }
+
+    loopCut(faceIndex, segments = 2) {
+        const polygon = this.polygons[faceIndex];
+        if (!polygon || polygon.length < 3 || segments < 2) return false;
+        const result = [];
+        for (let index = 0; index < polygon.length; index++) {
+            const start = polygon[index];
+            const end = polygon[(index + 1) % polygon.length];
+            const step = [
+                (end[0] - start[0]) / segments,
+                (end[1] - start[1]) / segments,
+                (end[2] - start[2]) / segments
+            ];
+            for (let segment = 0; segment < segments; segment++) {
+                result.push([
+                    start[0] + step[0] * segment,
+                    start[1] + step[1] * segment,
+                    start[2] + step[2] * segment
+                ]);
+            }
+        }
+        const clipped = result.filter((vertex, index, list) => index === 0 || !list.slice(0, index).some(existing => existing.every((value, axis) => Math.abs(value - vertex[axis]) < 1e-6)));
+        this.polygons[faceIndex] = clipped;
+        this.faceUvs[faceIndex] = (this.faceUvs[faceIndex] || clipped.map((_, vertexIndex) => defaultFaceUV(faceIndex, vertexIndex, clipped.length))).map((uv, index) => [uv[0], uv[1]]);
+        this.rebuildRenderData();
+        return true;
+    }
+
+    bridge(faceIndex, targetFaceIndex) {
+        const faceA = this.polygons[faceIndex];
+        const faceB = this.polygons[targetFaceIndex];
+        if (!faceA || !faceB || faceA.length !== faceB.length) return false;
+        const bridgeFaces = [];
+        for (let index = 0; index < faceA.length; index++) {
+            bridgeFaces.push([
+                [...faceA[index]],
+                [...faceA[(index + 1) % faceA.length]],
+                [...faceB[(index + 1) % faceB.length]],
+                [...faceB[index]]
+            ]);
+        }
+        this.polygons.splice(Math.min(faceIndex, targetFaceIndex), 1, ...bridgeFaces);
+        this.rebuildRenderData();
+        return true;
+    }
+
+    fill(faceIndex) {
+        const polygon = this.polygons[faceIndex];
+        if (!polygon || polygon.length < 3) return false;
+        const triangles = [];
+        for (let index = 1; index < polygon.length - 1; index++) {
+            triangles.push([polygon[0], polygon[index], polygon[index + 1]]);
+        }
+        this.polygons.splice(faceIndex, 1, ...triangles);
+        this.rebuildRenderData();
+        return true;
+    }
+
+    gridFill(faceIndex, columns = 2, rows = 2) {
+        const polygon = this.polygons[faceIndex];
+        if (!polygon || polygon.length < 4 || columns < 1 || rows < 1) return false;
+        const newFaces = [];
+        const startUv = this.faceUvs[faceIndex] || polygon.map((_, index) => defaultFaceUV(faceIndex, index, polygon.length));
+        for (let y = 0; y < rows; y++) {
+            for (let x = 0; x < columns; x++) {
+                const corners = [
+                    [x / columns, y / rows],
+                    [(x + 1) / columns, y / rows],
+                    [(x + 1) / columns, (y + 1) / rows],
+                    [x / columns, (y + 1) / rows]
+                ];
+                const local = corners.map(([u, v]) => {
+                    const point = polygon[0].map((_, axis) => {
+                        const a = polygon[1]?.[axis] ?? polygon[0][axis];
+                        const b = polygon[3]?.[axis] ?? polygon[0][axis];
+                        return (polygon[0][axis] * (1 - u) + a * u) * (1 - v) + (polygon[0][axis] * (1 - u) + b * u) * v;
+                    });
+                    return point;
+                });
+                newFaces.push(local);
+            }
+        }
+        this.polygons.splice(faceIndex, 1, ...newFaces);
+        this.faceUvs.splice(faceIndex, 1, ...newFaces.map((_, index) => [
+            [startUv[0] ? startUv[0][0] : 0, startUv[0] ? startUv[0][1] : 0],
+            [startUv[1] ? startUv[1][0] : 1, startUv[1] ? startUv[1][1] : 0],
+            [1, 1],
+            [0, 1]
+        ]));
+        this.rebuildRenderData();
+        return true;
+    }
+
+    dissolve(faceIndex) {
+        if (!this.polygons[faceIndex]) return false;
+        this.polygons.splice(faceIndex, 1);
+        this.faceUvs.splice(faceIndex, 1);
+        this.faceColors.splice(faceIndex, 1);
+        this.faceTextures.splice(faceIndex, 1);
+        this.faceTextureIds.splice(faceIndex, 1);
+        this.faceUvTransforms.splice(faceIndex, 1);
+        this.rebuildRenderData();
+        return true;
+    }
+
+    split(faceIndex, axis = 'x') {
+        const polygon = this.polygons[faceIndex];
+        if (!polygon || polygon.length < 3) return null;
+        const axisIndex = { x: 0, y: 1, z: 2 }[axis.toLowerCase()] ?? 0;
+        const clone = new Mesh(this.material);
+        clone.polygons = [polygon.map(vertex => [...vertex.map((value, index) => index === axisIndex ? value + 0.5 : value)])];
+        clone.faceUvs = [polygon.map((_, vertexIndex) => defaultFaceUV(0, vertexIndex, polygon.length))];
+        clone.faceColors = [[...this.faceColors[faceIndex] || [1, 1, 1, 1]]];
+        clone.faceTextures = [this.faceTextures[faceIndex] || null];
+        clone.faceTextureIds = [this.faceTextureIds[faceIndex] || null];
+        clone.faceUvTransforms = [{ ...this.faceUvTransforms[faceIndex] }];
+        clone.rebuildRenderData();
+        return clone;
+    }
+
+    separate(faceIndex) {
+        return this.split(faceIndex, 'x');
+    }
+
+    triangulate(faceIndex) {
+        const polygon = this.polygons[faceIndex];
+        if (!polygon || polygon.length < 4) return false;
+        const triangles = [];
+        for (let index = 1; index < polygon.length - 1; index++) {
+            triangles.push([polygon[0], polygon[index], polygon[index + 1]]);
+        }
+        this.polygons.splice(faceIndex, 1, ...triangles);
+        const uvSource = this.faceUvs[faceIndex] || polygon.map((_, index) => defaultFaceUV(faceIndex, index, polygon.length));
+        const newUvs = triangles.map((_, triangleIndex) => [
+            [...uvSource[0]],
+            [...uvSource[Math.min(1 + triangleIndex, uvSource.length - 1)]],
+            [...uvSource[Math.min(2 + triangleIndex, uvSource.length - 1)]]
+        ]);
+        this.faceUvs.splice(faceIndex, 1, ...newUvs);
+        this.faceColors.splice(faceIndex, 1, ...triangles.map(() => [...(this.faceColors[faceIndex] || [1, 1, 1, 1])]));
+        this.faceTextures.splice(faceIndex, 1, ...triangles.map(() => this.faceTextures[faceIndex] || null));
+        this.faceTextureIds.splice(faceIndex, 1, ...triangles.map(() => this.faceTextureIds[faceIndex] || null));
+        this.faceUvTransforms.splice(faceIndex, 1, ...triangles.map(() => ({ ...this.faceUvTransforms[faceIndex] })));
+        this.rebuildRenderData();
+        return true;
+    }
+
+    quadRebuild(faceIndex) {
+        const polygon = this.polygons[faceIndex];
+        if (!polygon || polygon.length < 3) return false;
+        const rebuilt = [];
+        for (let index = 0; index < polygon.length; index += 2) {
+            const next = (index + 2) % polygon.length;
+            rebuilt.push([polygon[index], polygon[(index + 1) % polygon.length], polygon[next], polygon[(next + 1) % polygon.length]]);
+        }
+        if (!rebuilt.length) return false;
+        this.polygons.splice(faceIndex, 1, ...rebuilt);
+        this.rebuildRenderData();
+        return true;
+    }
+
+    recalculateNormals() {
+        this.polygons.forEach((polygon, faceIndex) => {
+            if (!polygon || polygon.length < 3) return;
+            const edgeA = polygon[1].map((value, axis) => value - polygon[0][axis]);
+            const edgeB = polygon[2].map((value, axis) => value - polygon[0][axis]);
+            const normal = normalize3(cross3(edgeA, edgeB)) || [0, 1, 0];
+            for (let vertexIndex = 0; vertexIndex < polygon.length; vertexIndex++) {
+                const vertex = polygon[vertexIndex];
+                const vertexIndex = this.getVertexIndex(vertex);
+                const skin = this.vertexWeights.get(vertexIndex);
+                if (skin) {
+                    skin.bindPosition = [...vertex];
+                    this.vertexWeights.set(vertexIndex, skin);
+                }
+            }
+            if (this.faceUvs[faceIndex]) {
+                this.faceUvs[faceIndex] = this.faceUvs[faceIndex].map((uv, vertexIndex) => uv || defaultFaceUV(faceIndex, vertexIndex, polygon.length));
+            }
+            if (this.faceColors[faceIndex]) this.faceColors[faceIndex] = [...(this.faceColors[faceIndex] || [1, 1, 1, 1])];
+        });
+        this.rebuildRenderData();
+        return true;
+    }
+
+    flipNormals() {
+        this.polygons.forEach((polygon, faceIndex) => {
+            if (!polygon || polygon.length < 3) return;
+            this.polygons[faceIndex] = [...polygon].reverse();
+            if (this.faceUvs[faceIndex]) this.faceUvs[faceIndex] = [...this.faceUvs[faceIndex]].reverse();
+        });
+        this.rebuildRenderData();
+        return true;
+    }
+
     updateRenderQueues() {
         this.opaqueFaceIndices = [];
         this.transparentFaceIndices = [];
@@ -278,19 +740,20 @@ export class Mesh {
     }
 
     setVertexBoneWeight(faceIndex, vertexIndex, bone, weight = 1) {
-        const vertex = this.polygons[faceIndex]?.[vertexIndex];
+        const sharedVertexIndex = this.faces[faceIndex]?.[vertexIndex];
+        const vertex = this.positions[sharedVertexIndex];
         if (!vertex || !this.skeleton.bones.includes(bone)) return false;
-        let skin = this.vertexWeights.get(vertex);
+        let skin = this.vertexWeights.get(sharedVertexIndex);
         if (!skin) {
             skin = { bindPosition: [...vertex], weights: new Map() };
-            this.vertexWeights.set(vertex, skin);
+            this.vertexWeights.set(sharedVertexIndex, skin);
         }
         const normalizedWeight = Math.max(0, Math.min(1, weight));
         if (normalizedWeight === 0) skin.weights.delete(bone);
         else skin.weights.set(bone, normalizedWeight);
         const total = [...skin.weights.values()].reduce((sum, value) => sum + value, 0);
         if (total > 1) skin.weights.forEach((value, weightedBone) => skin.weights.set(weightedBone, value / total));
-        if (!skin.weights.size) this.vertexWeights.delete(vertex);
+        if (!skin.weights.size) this.vertexWeights.delete(sharedVertexIndex);
         this.skinRevision++;
         return true;
     }
@@ -303,13 +766,12 @@ export class Mesh {
         const end = start.map((value, axis) => value + direction[axis]);
         const segment = end.map((value, axis) => value - start[axis]);
         const segmentLengthSquared = Math.max(dot3(segment, segment), 1e-8);
-        const vertices = new Set(this.polygons.flat());
         let assigned = 0;
-        vertices.forEach(vertex => {
-            let skin = this.vertexWeights.get(vertex);
+        this.positions.forEach((vertex, vertexIndex) => {
+            let skin = this.vertexWeights.get(vertexIndex);
             if (!skin) {
                 skin = { bindPosition: [...vertex], weights: new Map() };
-                this.vertexWeights.set(vertex, skin);
+                this.vertexWeights.set(vertexIndex, skin);
             }
             const point = skin.bindPosition;
             const offset = point.map((value, axis) => value - start[axis]);
@@ -327,9 +789,9 @@ export class Mesh {
     }
 
     clearVertexBoneWeights(faceIndex, vertexIndex) {
-        const vertex = this.polygons[faceIndex]?.[vertexIndex];
-        if (!vertex) return false;
-        const cleared = this.vertexWeights.delete(vertex);
+        const sharedVertexIndex = this.faces[faceIndex]?.[vertexIndex];
+        if (sharedVertexIndex === undefined) return false;
+        const cleared = this.vertexWeights.delete(sharedVertexIndex);
         if (cleared) this.skinRevision++;
         return cleared;
     }
@@ -338,9 +800,9 @@ export class Mesh {
         const bone = this.skeleton.bones[index];
         if (!bone) return false;
         const removed = new Set(this.skeleton.removeBone(bone));
-        this.vertexWeights.forEach((skin, vertex) => {
+        this.vertexWeights.forEach((skin, vertexIndex) => {
             removed.forEach(removedBone => skin.weights.delete(removedBone));
-            if (!skin.weights.size) this.vertexWeights.delete(vertex);
+            if (!skin.weights.size) this.vertexWeights.delete(vertexIndex);
         });
         this.skinRevision++;
         this.selectedBone = this.skeleton.bones.length ? Math.min(index, this.skeleton.bones.length - 1) : null;
@@ -348,8 +810,9 @@ export class Mesh {
     }
 
     getDeformedPoint(vertex, transforms = null, bindTransforms = null) {
-        const skin = this.vertexWeights.get(vertex);
-        if (!skin?.weights.size) return [...vertex];
+        const vertexIndex = this.getVertexIndex(vertex);
+        const skin = this.vertexWeights.get(vertexIndex);
+        if (!skin?.weights.size) return [...(Number.isInteger(vertex) ? this.positions[vertexIndex] : vertex)];
         const current = transforms || this.skeleton.getWorldTransforms();
         const bind = bindTransforms || this.skeleton.getWorldTransforms(true);
         return deformPoint(skin, current, bind);
@@ -359,8 +822,8 @@ export class Mesh {
         const transforms = this.skeleton.getWorldTransforms();
         const bindTransforms = this.skeleton.getWorldTransforms(true);
         const positions = [];
-        this.polygons.forEach(polygon => polygon.forEach(vertex => {
-            positions.push(...this.getDeformedPoint(vertex, transforms, bindTransforms));
+        this.faces.forEach(face => face.forEach(vertexIndex => {
+            positions.push(...this.getDeformedPoint(vertexIndex, transforms, bindTransforms));
         }));
         return new Float32Array(positions);
     }
@@ -369,8 +832,8 @@ export class Mesh {
         const transforms = this.skeleton.getWorldTransforms();
         const bindTransforms = this.skeleton.getWorldTransforms(true);
         const normals = [];
-        this.polygons.forEach(polygon => {
-            const positions = polygon.map(vertex => this.getDeformedPoint(vertex, transforms, bindTransforms));
+        this.faces.forEach(face => {
+            const positions = face.map(vertexIndex => this.getDeformedPoint(vertexIndex, transforms, bindTransforms));
             const edgeA = positions[1]?.map((value, axis) => value - positions[0][axis]) || [0, 0, 0];
             const edgeB = positions[2]?.map((value, axis) => value - positions[0][axis]) || [0, 0, 0];
             const normal = normalize3(cross3(edgeA, edgeB)) || [0, 1, 0];
@@ -380,8 +843,9 @@ export class Mesh {
     }
 
     getVertexWeightData() {
-        return this.polygons.map(polygon => polygon.map(vertex => {
-            const skin = this.vertexWeights.get(vertex);
+        return this.faces.map(face => face.map(vertexIndex => {
+            const vertex = this.positions[vertexIndex];
+            const skin = this.vertexWeights.get(vertexIndex);
             return {
                 bindPosition: skin ? [...skin.bindPosition] : [...vertex],
                 weights: skin ? [...skin.weights].map(([bone, weight]) => ({ bone: bone.name, weight })) : [],
@@ -391,71 +855,85 @@ export class Mesh {
     }
 
     setFaceVertex(faceIndex, vertexIndex, position) {
-        if (!this.polygons[faceIndex]?.[vertexIndex]) return;
-        const previous = this.polygons[faceIndex][vertexIndex];
-        const skin = this.vertexWeights.get(previous);
-        this.polygons.forEach(polygon => polygon.forEach((vertex, otherVertex) => {
-            if (vertex === previous || Math.hypot(vertex[0] - previous[0], vertex[1] - previous[1], vertex[2] - previous[2]) < 0.0001) {
-                const replacement = [...position];
-                polygon[otherVertex] = replacement;
-                const previousSkin = this.vertexWeights.get(vertex) || skin;
-                if (previousSkin) this.vertexWeights.set(replacement, { bindPosition: [...position], weights: new Map(previousSkin.weights) });
-                this.vertexWeights.delete(vertex);
-            }
-        }));
+        const sharedVertexIndex = this.faces[faceIndex]?.[vertexIndex];
+        const vertex = this.positions[sharedVertexIndex];
+        if (!vertex) return;
+        vertex.splice(0, 3, ...position);
+        const skin = this.vertexWeights.get(sharedVertexIndex);
+        if (skin) skin.bindPosition = [...position];
         this.rebuildRenderData();
     }
 
     weldNearbyVertices(faceIndex, vertexIndex, threshold = 0.08) {
-        const source = this.polygons[faceIndex]?.[vertexIndex];
-        if (!source) return;
-        let nearest = null;
+        const sourceIndex = this.faces[faceIndex]?.[vertexIndex];
+        const source = this.positions[sourceIndex];
+        if (!source) return false;
+        let nearestIndex = -1;
         let nearestDistance = threshold;
-        this.polygons.forEach((polygon, otherFace) => polygon.forEach((vertex, otherVertex) => {
-            if (otherFace === faceIndex && otherVertex === vertexIndex) return;
+        this.positions.forEach((vertex, otherIndex) => {
+            if (otherIndex === sourceIndex) return;
             const distance = Math.hypot(vertex[0] - source[0], vertex[1] - source[1], vertex[2] - source[2]);
             if (distance < nearestDistance) {
-                nearest = vertex;
+                nearestIndex = otherIndex;
                 nearestDistance = distance;
             }
-        }));
-        if (nearest) {
-            this.polygons.forEach(polygon => polygon.forEach(vertex => {
-                if (Math.hypot(vertex[0] - source[0], vertex[1] - source[1], vertex[2] - source[2]) < threshold) {
-                    vertex.splice(0, 3, ...nearest);
-                }
-            }));
-        }
+        });
+        if (nearestIndex < 0) return false;
+        const remapped = new Set();
+        this.positions.forEach((vertex, index) => {
+            if (index !== nearestIndex && Math.hypot(vertex[0] - source[0], vertex[1] - source[1], vertex[2] - source[2]) < threshold) remapped.add(index);
+        });
+        const targetSkin = this.vertexWeights.get(nearestIndex);
+        remapped.forEach(index => {
+            const skin = this.vertexWeights.get(index);
+            if (skin) {
+                if (!targetSkin) this.vertexWeights.set(nearestIndex, skin);
+                else skin.weights.forEach((weight, bone) => targetSkin.weights.set(bone, Math.max(targetSkin.weights.get(bone) || 0, weight)));
+                this.vertexWeights.delete(index);
+            }
+        });
+        this.faces = this.faces.map(face => face.map(index => remapped.has(index) ? nearestIndex : index));
+        this._compactTopology();
+        this._refreshPolygonViews();
+        this.rebuildRenderData();
+        return true;
     }
 
     mergeNearbyVertices(faceIndex, vertexIndex, threshold = 0.08) {
-        const source = this.polygons[faceIndex]?.[vertexIndex];
+        const sourceIndex = this.faces[faceIndex]?.[vertexIndex];
+        const source = this.positions[sourceIndex];
         if (!source) return false;
         const connected = new Set();
-        this.polygons.forEach(polygon => polygon.forEach(vertex => {
+        this.positions.forEach((vertex, index) => {
             if (Math.hypot(vertex[0] - source[0], vertex[1] - source[1], vertex[2] - source[2]) <= threshold) connected.add(vertex);
-        }));
+        });
         if (connected.size < 2) return false;
+        const connectedIndices = new Set([...connected].map(vertex => this.getVertexIndex(vertex)));
         const merged = [...source].map((_, axis) => [...connected].reduce((sum, vertex) => sum + vertex[axis] / connected.size, 0));
-        const skins = [...connected].map(vertex => this.vertexWeights.get(vertex)).filter(Boolean);
+        const skins = [...connectedIndices].map(index => this.vertexWeights.get(index)).filter(Boolean);
+        const mergedIndex = this.positions.length;
+        this.positions.push(merged);
+        this.faces = this.faces.map(face => face.map(index => connectedIndices.has(index) ? mergedIndex : index));
+        const weights = new Map();
         if (skins.length) {
-            const weights = new Map();
             skins.forEach(skin => skin.weights.forEach((weight, bone) => weights.set(bone, (weights.get(bone) || 0) + weight / skins.length)));
-            this.vertexWeights.set(merged, { bindPosition: [...merged], weights });
         }
-        connected.forEach(vertex => this.vertexWeights.delete(vertex));
-        this.polygons = this.polygons.map(polygon => polygon.map(vertex => connected.has(vertex) ? merged : vertex));
+        connectedIndices.forEach(index => this.vertexWeights.delete(index));
+        if (skins.length) this.vertexWeights.set(mergedIndex, { bindPosition: [...merged], weights });
+        this._compactTopology();
+        this._refreshPolygonViews();
         this.rebuildRenderData();
         return true;
     }
 
     mergeCoplanarFace(faceIndex, tolerance = 0.0001) {
-        const faceA = this.polygons[faceIndex];
+        const polygonViews = this.polygons;
+        const faceA = polygonViews[faceIndex];
         const frameA = this.getFaceFrame(faceIndex);
         if (!faceA || !frameA) return false;
-        for (let otherIndex = 0; otherIndex < this.polygons.length; otherIndex++) {
+        for (let otherIndex = 0; otherIndex < polygonViews.length; otherIndex++) {
             if (otherIndex === faceIndex) continue;
-            const faceB = this.polygons[otherIndex];
+            const faceB = polygonViews[otherIndex];
             const frameB = this.getFaceFrame(otherIndex);
             if (!frameB || dot3(frameA.normal, frameB.normal) < 0.999) continue;
             if (!faceB.every(vertex => Math.abs(dot3(vertex.map((value, axis) => value - frameA.center[axis]), frameA.normal)) <= tolerance)) continue;
@@ -471,11 +949,13 @@ export class Mesh {
             const boundary = stitchFaceEdges(boundaryEdges);
             if (!boundary || boundary.vertices.length < 3) continue;
 
-            this.polygons[faceIndex] = boundary.vertices;
+            this.faces[faceIndex] = boundary.vertices.map(vertex => this.getVertexIndex(vertex));
             this.faceUvs[faceIndex] = boundary.uvs;
-            this.polygons.splice(otherIndex, 1);
+            this.faces.splice(otherIndex, 1);
             [this.faceColors, this.faceTextures, this.faceTextureIds, this.faceUvTransforms, this.faceUvs].forEach(values => values.splice(otherIndex, 1));
             this.selectedFace = otherIndex < faceIndex ? faceIndex - 1 : faceIndex;
+            this._compactTopology();
+            this._refreshPolygonViews();
             this.rebuildRenderData();
             return true;
         }
@@ -499,35 +979,41 @@ export class Mesh {
     }
 
     updateBindVertex(vertex) {
-        const skin = this.vertexWeights.get(vertex);
+        const vertexIndex = this.getVertexIndex(vertex);
+        const skin = this.vertexWeights.get(vertexIndex);
         if (skin) skin.bindPosition = [...vertex];
     }
 
+    _compactTopology() {
+        const usedIndices = new Set(this.faces.flat());
+        const remap = new Map();
+        const positions = [];
+        this.positions.forEach((position, index) => {
+            if (!usedIndices.has(index)) return;
+            remap.set(index, positions.length);
+            positions.push(position);
+        });
+        const weights = new Map();
+        this.vertexWeights.forEach((skin, index) => {
+            if (remap.has(index)) weights.set(remap.get(index), skin);
+        });
+        this.faces = this.faces.map(face => face.map(index => remap.get(index)));
+        this.positions = positions;
+        this.vertexWeights = weights;
+    }
+
     rebuildRenderData() {
-        const verticesByPosition = new Map();
-        this.polygons = this.polygons.map(polygon => polygon.map(vertex => {
-            const key = vertex.join(',');
-            const attachedVertex = verticesByPosition.get(key);
-            if (attachedVertex) {
-                const sourceSkin = this.vertexWeights.get(vertex);
-                if (sourceSkin && !this.vertexWeights.has(attachedVertex)) this.vertexWeights.set(attachedVertex, sourceSkin);
-                else if (sourceSkin && sourceSkin !== this.vertexWeights.get(attachedVertex)) {
-                    const attachedSkin = this.vertexWeights.get(attachedVertex);
-                    sourceSkin.weights.forEach((weight, bone) => attachedSkin.weights.set(bone, Math.max(attachedSkin.weights.get(bone) || 0, weight)));
-                }
-                return attachedVertex;
-            }
-            verticesByPosition.set(key, vertex);
-            return vertex;
-        }));
+        if (this._legacyViewExposed) this._syncTopologyFromPolygonViews();
 
         const vertices = [];
         const normals = [];
         const colors = [];
         const uvs = [];
         const indices = [];
+        const wireframeIndices = [];
         this.faceRanges = [];
-        this.polygons.forEach((polygon, faceIndex) => {
+        this.faces.forEach((face, faceIndex) => {
+            const polygon = face.map(vertexIndex => this.positions[vertexIndex]);
             const vertexStart = vertices.length / 3;
             const edgeA = polygon[1]?.map((value, axis) => value - polygon[0][axis]) || [0, 0, 0];
             const edgeB = polygon[2]?.map((value, axis) => value - polygon[0][axis]) || [0, 0, 0];
@@ -545,6 +1031,9 @@ export class Mesh {
             for (let vertexIndex = 1; vertexIndex < polygon.length - 1; vertexIndex++) {
                 indices.push(vertexStart, vertexStart + vertexIndex, vertexStart + vertexIndex + 1);
             }
+            for (let vertexIndex = 0; vertexIndex < polygon.length; vertexIndex++) {
+                wireframeIndices.push(vertexStart + vertexIndex, vertexStart + (vertexIndex + 1) % polygon.length);
+            }
             this.faceRanges.push({ offset: indices.length - Math.max(0, polygon.length - 2) * 3, count: Math.max(0, polygon.length - 2) * 3 });
         });
         this.vertices = new Float32Array(vertices);
@@ -552,13 +1041,25 @@ export class Mesh {
         this.colors = new Float32Array(colors);
         this.uvs = new Float32Array(uvs);
         this.indices = new Uint16Array(indices);
+        this.wireframeIndices = new Uint16Array(wireframeIndices);
+        this.triangleCount = indices.length / 3;
+        const boundsMin = [Infinity, Infinity, Infinity];
+        const boundsMax = [-Infinity, -Infinity, -Infinity];
+        this.positions.forEach(vertex => vertex.forEach((value, axis) => {
+            boundsMin[axis] = Math.min(boundsMin[axis], value);
+            boundsMax[axis] = Math.max(boundsMax[axis], value);
+        }));
+        this.boundsMin = boundsMin[0] === Infinity ? null : boundsMin;
+        this.boundsMax = boundsMax[0] === -Infinity ? null : boundsMax;
         this.geometrySignature = hashGeometry(this.vertices, this.indices);
-        this.faceCount = this.polygons.length;
+        this.faceCount = this.faces.length;
         this.allFaceIndices = Array.from({ length: this.faceCount }, (_, faceIndex) => faceIndex);
         while (this.faceColors.length < this.faceCount) this.faceColors.push([1, 1, 1, 1]);
         while (this.faceTextures.length < this.faceCount) this.faceTextures.push(null);
         while (this.faceTextureIds.length < this.faceCount) this.faceTextureIds.push(null);
         while (this.faceUvTransforms.length < this.faceCount) this.faceUvTransforms.push({ scale: [1, 1], offset: [0, 0], rotation: 0, flipX: false, flipY: false });
+        this._rebuildTopologyAdjacency();
+        this._refreshPolygonViews();
         this.updateRenderQueues();
         if (this.vao) this.invalidateBuffers();
     }
@@ -621,7 +1122,10 @@ export class Mesh {
 
         const ibo = gl.createBuffer();
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, this.indices, gl.STATIC_DRAW);
+        const elementIndices = new Uint16Array(this.indices.length + this.wireframeIndices.length);
+        elementIndices.set(this.indices);
+        elementIndices.set(this.wireframeIndices, this.indices.length);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, elementIndices, gl.STATIC_DRAW);
 
         if (gl.createVertexArray) {
             gl.bindVertexArray(null);
@@ -653,7 +1157,7 @@ export class Mesh {
         return out;
     }
 
-    draw(gl, program, faceIndices = null, frameToken = undefined) {
+    draw(gl, program, faceIndices = null, frameToken = undefined, renderMode = 'anime', stats = null) {
         this.initBuffers(gl, program);
 
         if (gl.createVertexArray) {
@@ -665,7 +1169,7 @@ export class Mesh {
         const uniforms = this.getUniformLocations(gl, program);
         gl.uniformMatrix4fv(uniforms.uModel, false, this.getModelMatrix());
         gl.uniform1f(uniforms.uInstanced, 0);
-        gl.uniform1f(uniforms.uToonShading, this.material.shading === 'toon' ? 1 : 0);
+        gl.uniform1f(uniforms.uToonShading, renderMode === 'anime' && this.material.shading === 'toon' ? 1 : 0);
         if (this.vertexWeights.size) {
             if (frameToken === undefined || this.skinningFrame !== frameToken) {
                 gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
@@ -674,6 +1178,18 @@ export class Mesh {
                 gl.bufferData(gl.ARRAY_BUFFER, this.getDeformedNormals(), gl.DYNAMIC_DRAW);
                 this.skinningFrame = frameToken;
             }
+        }
+        if (renderMode === 'wireframe') {
+            const color = this.material.color;
+            gl.uniform4fv(uniforms.uColor, new Float32Array([color[0], color[1], color[2], color[3] ?? 1]));
+            gl.uniform1i(uniforms.uUseTexture, 0);
+            gl.uniform1f(uniforms.uRayShadowed, 0);
+            gl.uniform1f(uniforms.uFaceSelected, 0);
+            gl.drawElements(gl.LINES, this.wireframeIndices.length, gl.UNSIGNED_SHORT, this.indices.byteLength);
+            if (stats) stats.drawCalls++;
+            if (gl.createVertexArray) gl.bindVertexArray(null);
+            else this.vaoExtension.bindVertexArrayOES(null);
+            return;
         }
         const batches = this.getDrawBatches(faceIndices || this.allFaceIndices);
         let batchOffset = 0;
@@ -689,19 +1205,24 @@ export class Mesh {
         const flushBatch = () => {
             if (!batchCount) return;
             gl.uniform4fv(uniforms.uColor, batchColor);
-            gl.uniform1i(uniforms.uUseTexture, batchTexture ? 1 : 0);
+            const texture = renderMode === 'solid' ? null : batchTexture;
+            gl.uniform1i(uniforms.uUseTexture, texture ? 1 : 0);
             gl.uniform1f(uniforms.uFaceSelected, batchSelected ? 1 : 0);
             gl.uniform1f(uniforms.uRayShadowed, batchShadowed ? 1 : 0);
             gl.uniform4f(uniforms.uUVTransform, batchTransform.scale[0] * (batchTransform.flipX ? -1 : 1), batchTransform.scale[1] * (batchTransform.flipY ? -1 : 1), batchTransform.offset[0], batchTransform.offset[1]);
             gl.uniform1f(uniforms.uUVRotation, batchTransform.rotation);
             gl.uniform2f(uniforms.uUVCenter, batchUvCenter[0], batchUvCenter[1]);
-            if (batchTexture !== previousTexture && batchTexture) {
+            if (texture !== previousTexture && texture) {
                 gl.activeTexture(gl.TEXTURE0);
-                gl.bindTexture(gl.TEXTURE_2D, batchTexture);
+                gl.bindTexture(gl.TEXTURE_2D, texture);
                 gl.uniform1i(uniforms.uTexture, 0);
-                previousTexture = batchTexture;
+                previousTexture = texture;
             }
             gl.drawElements(gl.TRIANGLES, batchCount, gl.UNSIGNED_SHORT, batchOffset * 2);
+            if (stats) {
+                stats.drawCalls++;
+                stats.triangles += batchCount / 3;
+            }
         };
         for (const batch of batches) {
             batchOffset = batch.offset;
@@ -795,6 +1316,23 @@ export class Mesh {
 }
 
 const DEFAULT_UV_CENTER = [0.5, 0.5];
+
+function projectToPlane(point, center, normal) {
+    const vector = point.map((value, axis) => value - center[axis]);
+    const projection = dot3(vector, normal);
+    return point.map((value, axis) => value - normal[axis] * projection);
+}
+
+function segmentToSegmentIntersection(a, b, c, d) {
+    const ab = a.map((value, axis) => b[axis] - value);
+    const cd = c.map((value, axis) => d[axis] - value);
+    const denom = dot3(cross3(ab, cd), cross3(ab, cd));
+    if (denom < 1e-8) return null;
+    const n = cross3(ab, cd);
+    const t = dot3(cross3(c.map((value, axis) => value - a[axis]), cd), n) / denom;
+    if (!Number.isFinite(t) || t < 0 || t > 1) return null;
+    return [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t];
+}
 
 function hashGeometry(vertices, indices) {
     let first = 2166136261;

@@ -53,5 +53,22 @@ export const mat4 = {
         out[14] = (2 * far * near) * nf;
         out[15] = 0;
         return out;
+    },
+
+    orthographic(height, aspect, near, far) {
+        const width = height * aspect;
+        const left = -width / 2;
+        const right = width / 2;
+        const bottom = -height / 2;
+        const top = height / 2;
+        const out = new Float32Array(16);
+        out[0] = 2 / (right - left);
+        out[5] = 2 / (top - bottom);
+        out[10] = -2 / (far - near);
+        out[12] = -(right + left) / (right - left);
+        out[13] = -(top + bottom) / (top - bottom);
+        out[14] = -(far + near) / (far - near);
+        out[15] = 1;
+        return out;
     }
 };

@@ -1,4 +1,4 @@
-export function createHierarchyPanel(scene, { onSelect, onDelete, onReorder, getSelected }) {
+export function createHierarchyPanel(scene, { onSelect, onDelete, onReorder, getSelected, getSelectedItems = () => [] }) {
     const panel = document.createElement('div');
     panel.className = 'editor-panel';
 
@@ -15,14 +15,16 @@ export function createHierarchyPanel(scene, { onSelect, onDelete, onReorder, get
         list.innerHTML = '';
         scene.meshes.forEach((mesh, i) => {
             const li = document.createElement('li');
-            li.className = 'hierarchy-item' + (mesh === getSelected() ? ' selected' : '');
+            const selectedItems = getSelectedItems();
+            const isSelected = selectedItems instanceof Set ? selectedItems.has(mesh) : selectedItems.includes(mesh);
+            li.className = 'hierarchy-item' + (mesh === getSelected() || isSelected ? ' selected' : '');
             li.draggable = true;
             li.dataset.meshIndex = String(i);
             const name = document.createElement('button');
             name.className = 'hierarchy-select';
             name.type = 'button';
             name.textContent = mesh.name || 'Mesh ' + i;
-            name.addEventListener('click', () => onSelect(mesh));
+            name.addEventListener('click', event => onSelect(mesh, event.shiftKey || event.ctrlKey || event.metaKey));
             const remove = document.createElement('button');
             remove.className = 'hierarchy-delete';
             remove.type = 'button';

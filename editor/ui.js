@@ -6,18 +6,22 @@ import { createLightingPanel } from './panels/lighting.js';
 import { DirectionalLight } from '../engine/light.js';
 
 export function createUI(root, options) {
-    const { scene, onSelect, onSelectFace, onSetPickMode, onAddCube, onAddPlane, onAddSphere, onAddCylinder, onAddBatch, onDuplicate, onAddFace, onExtrudeFace, onMergeFace, onMergeVertices, onAddVertex, onAddBone, onRemoveBone, onCreateAnimation, onKeyPose, onDeleteBoneKeys, onSeekAnimation, onToggleAnimation, onRenameAnimation, onSetAnimationDuration, onImportMesh, onImportTexture, onDelete, onReorderMesh, onResetCamera, onExport, onUndo, onRedo, onHistory = () => {} } = options;
+    const { scene, onSelect, onSelectFace, onSetPickMode, onAddCube, onAddPlane, onAddSphere, onAddCylinder, onAddBatch, onDuplicate, onAddFace, onExtrudeFace, onMergeFace, onMergeVertices, onAddVertex, onAddBone, onRemoveBone, onCreateAnimation, onKeyPose, onDeleteBoneKeys, onSeekAnimation, onToggleAnimation, onRenameAnimation, onSetAnimationDuration, onImportMesh, onImportTexture, onDelete, onReorderMesh, onResetCamera, onExport, onUndo, onRedo, onHistory = () => {}, onKnifeTool, onBevel, onInset, onLoopCut, onBridge, onFill, onGridFill, onDissolve, onSplit, onSeparate, onTriangulate, onQuadRebuild, onRecalculateNormals, onFlipNormals } = options;
+    const sceneActions = options.sceneActions || {};
     root.style.pointerEvents = 'none';
     root.innerHTML = '';
+    let saveCurrentLayout = () => {};
+    let resetCurrentLayout = () => {};
 
     const style = document.createElement('style');
     style.textContent = `
         #ui-root { color: #e8edf5; font: 13px/1.4 system-ui, sans-serif; }
         .internal-fps { position: fixed; right: 12px; bottom: 12px; z-index: 20; padding: 6px 9px; color: #bfe9d3; background: rgba(13, 23, 20, 0.92); border: 1px solid rgba(115, 190, 150, 0.45); font: 12px/1.3 ui-monospace, monospace; font-variant-numeric: tabular-nums; pointer-events: none; }
         .polygon-counter { position: fixed; right: 12px; bottom: 44px; z-index: 20; max-width: calc(100vw - 24px); padding: 6px 9px; color: #d7e8fa; background: rgba(15, 23, 34, 0.94); border: 1px solid rgba(130, 165, 202, 0.4); font: 12px/1.3 ui-monospace, monospace; font-variant-numeric: tabular-nums; pointer-events: none; }
-        .editor-shell { position: fixed; top: 12px; left: 12px; z-index: 10; display: flex; flex-direction: column; gap: 8px; width: min(calc(100vw - 24px), 920px); max-height: calc(100vh - 24px); box-sizing: border-box; overflow: visible; pointer-events: none; }
-        .editor-toolbar { background: rgba(16, 22, 32, 0.92); border: 1px solid rgba(164, 183, 211, 0.2); box-shadow: 0 10px 30px rgba(0,0,0,.25); pointer-events: auto; }
-        .editor-toolbar { display: flex; flex-direction: column; gap: 5px; padding: 7px; }
+        .viewport-stats { position: fixed; left: 12px; bottom: 12px; z-index: 20; padding: 6px 9px; color: #d7e8fa; background: rgba(15, 23, 34, 0.94); border: 1px solid rgba(130, 165, 202, 0.4); font: 12px/1.3 ui-monospace, monospace; font-variant-numeric: tabular-nums; pointer-events: none; }
+        .operator-status { position: fixed; left: 12px; bottom: 44px; z-index: 20; max-width: min(50vw, 420px); overflow: hidden; padding: 6px 9px; color: #d7e8fa; background: rgba(15, 23, 34, 0.94); border: 1px solid rgba(130, 165, 202, 0.4); font: 12px/1.3 ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+        .editor-shell { position: fixed; inset: 0; z-index: 10; display: grid; grid-template-columns: minmax(210px, 18vw) minmax(0, 1fr) minmax(250px, 22vw); grid-template-rows: auto minmax(180px, 1fr) minmax(190px, 28vh); grid-template-areas: 'toolbar toolbar toolbar' 'hierarchy viewport inspector' 'assets assets animation'; box-sizing: border-box; overflow: hidden; pointer-events: none; }
+        .editor-toolbar { grid-area: toolbar; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 5px 8px; background: rgba(16, 20, 25, 0.98); border-bottom: 1px solid #343b43; pointer-events: auto; }
         .editor-toolbar-head { position: relative; display: flex; align-items: center; gap: 6px; min-height: 26px; }
         .tool-group { min-width: 0; }
         .tool-group summary { padding: 5px 8px; color: #9ed8ff; background: #101722; border: 1px solid #26384d; cursor: pointer; list-style: none; }
@@ -25,13 +29,17 @@ export function createUI(root, options) {
         .tool-group summary::before { content: '+'; display: inline-block; width: 18px; color: #ffd071; }
         .tool-group[open] summary::before { content: '-'; }
         .tool-group-content { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 0 2px; }
+        .scene-controls { display: grid; grid-template-columns: repeat(3, minmax(92px, 1fr)); gap: 5px; width: min(390px, 100%); }
+        .scene-controls .scene-wide { grid-column: 1 / -1; }
+        .scene-controls .check-row { grid-column: 1 / -1; margin: 0; }
+        .scene-status { grid-column: 1 / -1; min-height: 16px; color: #9aa9ba; font: 11px/1.3 ui-monospace, monospace; }
         .batch-create-controls { display: grid; grid-template-columns: minmax(100px, 1fr) 80px 80px auto; gap: 5px; align-items: center; width: 100%; }
         .batch-create-status { grid-column: 1 / -1; min-height: 16px; color: #9aa9ba; font: 11px/1.3 ui-monospace, monospace; }
-        .editor-title { margin: 0 12px 0 4px; font-size: 14px; letter-spacing: .04em; text-transform: uppercase; color: #9ed8ff; }
-        .editor-button { border: 1px solid #3b526d; background: #1b2a3b; color: #e8edf5; padding: 6px 10px; cursor: pointer; border-radius: 3px; }
-        .editor-button:hover { background: #29425c; }
+        .editor-title { margin: 0 8px 0 4px; font-size: 13px; font-weight: 650; letter-spacing: 0; text-transform: uppercase; color: #e8edf5; white-space: nowrap; }
+        .editor-button { border: 1px solid #48515b; background: #292f36; color: #e8edf5; padding: 5px 9px; cursor: pointer; border-radius: 2px; }
+        .editor-button:hover { background: #3a424b; }
         .editor-panels { display: contents; }
-        .editor-panel { min-width: 0; min-height: 0; padding: 10px; overflow: auto; scrollbar-width: thin; scrollbar-color: #526c88 #101722; pointer-events: auto; background: rgba(16, 22, 32, 0.92); border: 1px solid rgba(164, 183, 211, 0.2); box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+        .editor-panel { box-sizing: border-box; width: 100%; min-width: 0; min-height: 0; padding: 10px; overflow: auto; scrollbar-width: thin; scrollbar-color: #59636e #171b20; pointer-events: auto; background: rgba(24, 28, 33, 0.97); }
         .panel-title { margin: 0 0 8px; color: #9ed8ff; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
         .hierarchy-list { list-style: none; padding: 0; margin: 0; }
         .hierarchy-item { display: flex; align-items: center; gap: 4px; padding: 2px; border: 1px solid transparent; }
@@ -45,9 +53,13 @@ export function createUI(root, options) {
         .vector-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
         .editor-input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid #3b526d; background: #101722; color: #e8edf5; padding: 5px; pointer-events: auto; }
         .editor-panel button, .editor-panel label, .editor-panel input, .hierarchy-item { pointer-events: auto; }
-        .panel-disclosure { position: fixed; z-index: 11; width: min(300px, calc(100vw - 24px)); max-height: min(86vh, 820px); min-height: 34px; overflow: hidden; color: #e8edf5; background: rgba(16, 22, 32, 0.96); border: 1px solid rgba(164, 183, 211, 0.3); box-shadow: 0 10px 30px rgba(0,0,0,.28); pointer-events: auto; }
+        .panel-disclosure { position: relative; z-index: 2; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; color: #e8edf5; background: #181c21; border: 1px solid #343b43; pointer-events: auto; }
+        .panel-disclosure[data-dock='hierarchy'] { grid-area: hierarchy; }
+        .panel-disclosure[data-dock='inspector'] { grid-area: inspector; }
+        .panel-disclosure[data-dock='assets'] { grid-area: assets; }
+        .panel-disclosure[data-dock='animation'] { grid-area: animation; }
         .panel-disclosure:not([open]) { height: auto !important; }
-        .panel-disclosure[open] { display: flex; flex-direction: column; }
+        .panel-disclosure[open] { min-height: 0; }
         .panel-disclosure[open] > .editor-panel { flex: 1; }
         .panel-disclosure > summary { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: 0 0 34px; min-height: 34px; box-sizing: border-box; padding: 4px 7px; color: #9ed8ff; background: rgba(16, 22, 32, 0.98); cursor: pointer; pointer-events: auto; list-style: none; }
         .panel-disclosure > summary::-webkit-details-marker { display: none; }
@@ -56,7 +68,9 @@ export function createUI(root, options) {
         .panel-drag-handle { position: absolute; top: 4px; left: 50%; width: 42px; height: 25px; padding: 0; border: 1px solid #3b526d; background: #101722; color: #9aa9ba; cursor: move; touch-action: none; transform: translateX(-50%); }
         .panel-drag-handle:active { color: #ffd071; }
         .panel-resize-handle { position: absolute; right: 1px; bottom: 1px; z-index: 12; display: none; width: 20px; height: 20px; padding: 0; border: 0; background: transparent; cursor: nwse-resize; pointer-events: auto; touch-action: none; }
-        .panel-disclosure[open] > .panel-resize-handle { display: block; }
+        .panel-disclosure[data-floating='true'][open] > .panel-resize-handle { display: block; }
+        .panel-disclosure[data-floating='true'] { position: fixed; z-index: 20; width: min(340px, calc(100vw - 24px)); height: min(55vh, 620px); max-height: calc(100vh - 16px); border: 1px solid #505963; box-shadow: 0 12px 32px rgba(0,0,0,.48); }
+        .panel-disclosure[data-floating='true'] > .editor-panel { min-height: 0; }
         .panel-resize-handle::after { position: absolute; right: 3px; bottom: 3px; width: 9px; height: 9px; border-right: 2px solid #9aa9ba; border-bottom: 2px solid #9aa9ba; content: ''; }
         .editor-button.selected { background: #284a68; border-color: #9ed8ff; }
         .face-title { margin: 0 0 8px; color: #ffd071; font-weight: 700; }
@@ -96,7 +110,7 @@ export function createUI(root, options) {
         .skinning-disclosure .bone-weight-group { padding: 8px 0 0; border-top: 0; }
         .bone-weight-group .editor-button { margin: 4px 4px 0 0; }
         .asset-item { padding: 5px 7px; background: #101722; border: 1px solid #26384d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .uv-workspace { display: none; flex-direction: column; width: 100%; height: min(68vh, 620px); min-height: 360px; box-sizing: border-box; padding: 10px; background: rgba(16, 22, 32, 0.96); border: 1px solid rgba(164, 183, 211, 0.2); pointer-events: auto; }
+        .uv-workspace { grid-area: viewport; display: none; flex-direction: column; min-width: 0; min-height: 0; box-sizing: border-box; padding: 10px; background: rgba(24, 28, 33, 0.98); border: 1px solid #343b43; pointer-events: auto; }
         .uv-workspace-title { margin: 0 0 8px; color: #9ed8ff; font-size: 11px; text-transform: uppercase; }
         .uv-image-row { display: flex; align-items: center; gap: 8px; max-width: 400px; margin-bottom: 8px; color: #9aa9ba; font-size: 11px; text-transform: uppercase; }
         .uv-image-row .editor-input { flex: 1; }
@@ -107,7 +121,7 @@ export function createUI(root, options) {
         .uv-canvas:active { cursor: grabbing; }
         .editor-shell.uv-mode .uv-workspace { display: flex; }
         .editor-shell.uv-mode .editor-panels { display: none; }
-        @media (max-width: 700px) { .editor-toolbar { flex-wrap: wrap; } .editor-title { width: 100%; } }
+        @media (max-width: 760px) { .editor-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(150px, 36vh) minmax(110px, 22vh) minmax(110px, 22vh) minmax(110px, 22vh) minmax(110px, 22vh); grid-template-areas: 'toolbar' 'viewport' 'hierarchy' 'inspector' 'assets' 'animation'; overflow: auto; } .editor-toolbar { position: sticky; top: 0; z-index: 5; } .panel-disclosure[data-floating='true'] { max-width: calc(100vw - 16px); } }
     `;
     root.appendChild(style);
     const fpsReadout = document.createElement('div');
@@ -118,6 +132,14 @@ export function createUI(root, options) {
     polygonReadout.className = 'polygon-counter';
     polygonReadout.textContent = 'Current Mesh Polygons / All Polygons: 0 / 0';
     root.appendChild(polygonReadout);
+    const viewportStats = document.createElement('div');
+    viewportStats.className = 'viewport-stats';
+    viewportStats.textContent = 'Draw calls 0 | Triangles 0 | Objects 0';
+    root.appendChild(viewportStats);
+    const operatorStatus = document.createElement('div');
+    operatorStatus.className = 'operator-status';
+    operatorStatus.textContent = 'Ready';
+    root.appendChild(operatorStatus);
     window.addEventListener('keydown', event => {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
             event.preventDefault();
@@ -149,8 +171,19 @@ export function createUI(root, options) {
     toolbarHead.className = 'editor-toolbar-head';
     const title = document.createElement('h1');
     title.className = 'editor-title';
-    title.textContent = 'Lightweight 3D';
+    title.textContent = 'Engine Editor';
     toolbarHead.appendChild(title);
+    const saveLayoutButton = document.createElement('button');
+    saveLayoutButton.className = 'editor-button';
+    saveLayoutButton.type = 'button';
+    saveLayoutButton.textContent = 'Save Layout';
+    saveLayoutButton.addEventListener('click', () => saveCurrentLayout());
+    const resetLayoutButton = document.createElement('button');
+    resetLayoutButton.className = 'editor-button';
+    resetLayoutButton.type = 'button';
+    resetLayoutButton.textContent = 'Reset Layout';
+    resetLayoutButton.addEventListener('click', () => resetCurrentLayout());
+    toolbarHead.append(saveLayoutButton, resetLayoutButton);
     toolbar.appendChild(toolbarHead);
     let activeToolGroup = toolbarHead;
 
@@ -174,6 +207,7 @@ export function createUI(root, options) {
         element.textContent = label;
         element.addEventListener('click', handler);
         activeToolGroup.appendChild(element);
+        return element;
     };
 
     group('Modeling');
@@ -241,15 +275,222 @@ export function createUI(root, options) {
     button('+ Bone', () => onAddBone(null));
     button('Delete', onDelete);
 
+    group('Advanced Modeling');
+    button('Knife', onKnifeTool);
+    button('Bevel', onBevel);
+    button('Inset', onInset);
+    button('Loop Cut', onLoopCut);
+    button('Bridge', onBridge);
+    button('Fill', onFill);
+    button('Grid Fill', onGridFill);
+    button('Dissolve', onDissolve);
+    button('Split', onSplit);
+    button('Separate', onSeparate);
+    button('Triangulate', onTriangulate);
+    button('Quad Rebuild', onQuadRebuild);
+    button('Normals', onRecalculateNormals);
+    button('Flip Normals', onFlipNormals);
+
     group('Selection Mode');
     const modeButtons = document.createElement('div');
     modeButtons.className = 'tool-group-content';
     const modeGroup = activeToolGroup;
     modeGroup.appendChild(modeButtons);
 
+    group('Transform');
+    const transformButtons = new Map();
+    const setTransformTool = mode => {
+        transformButtons.forEach((element, key) => element.classList.toggle('selected', key === mode));
+        options.onSetTransformTool?.(mode);
+    };
+    [['Select', 'select'], ['Move', 'move'], ['Rotate', 'rotate'], ['Scale', 'scale']].forEach(([label, mode]) => {
+        transformButtons.set(mode, button(label, () => setTransformTool(mode)));
+    });
+    transformButtons.get('select').classList.add('selected');
+    const transformSpace = document.createElement('select');
+    transformSpace.className = 'editor-input';
+    transformSpace.setAttribute('aria-label', 'Transform space');
+    [['world', 'World'], ['local', 'Local']].forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        transformSpace.appendChild(option);
+    });
+    transformSpace.addEventListener('change', () => options.onSetTransformSpace?.(transformSpace.value));
+    activeToolGroup.appendChild(transformSpace);
+
+    let selectedAxis = null;
+    const axisButtons = new Map();
+    ['x', 'y', 'z'].forEach(axis => {
+        axisButtons.set(axis, button(axis.toUpperCase(), () => {
+            selectedAxis = selectedAxis === axis ? null : axis;
+            axisButtons.forEach((element, key) => element.classList.toggle('selected', key === selectedAxis));
+            options.onSetAxisLock?.(axis);
+        }));
+    });
+    const snapSettings = { position: false, rotation: false, scale: false, positionStep: 0.5, rotationStep: 15, scaleStep: 0.1 };
+    const addSnapControl = (key, label, stepKey, defaultValue, minimum, increment) => {
+        const labelElement = document.createElement('label');
+        labelElement.className = 'check-row';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        const caption = document.createElement('span');
+        caption.textContent = label;
+        labelElement.append(checkbox, caption);
+        activeToolGroup.appendChild(labelElement);
+        const amount = document.createElement('input');
+        amount.className = 'editor-input';
+        amount.type = 'number';
+        amount.min = String(minimum);
+        amount.step = String(increment);
+        amount.value = String(defaultValue);
+        amount.disabled = true;
+        amount.setAttribute('aria-label', `${label} increment`);
+        activeToolGroup.appendChild(amount);
+        const update = () => {
+            snapSettings[key] = checkbox.checked;
+            snapSettings[stepKey] = Math.max(minimum, Number(amount.value) || defaultValue);
+            amount.value = String(snapSettings[stepKey]);
+            amount.disabled = !checkbox.checked;
+            options.onSetSnap?.({ ...snapSettings });
+        };
+        checkbox.addEventListener('change', update);
+        amount.addEventListener('change', update);
+    };
+    addSnapControl('position', 'Position snap', 'positionStep', 0.5, 0.001, 0.1);
+    addSnapControl('rotation', 'Rotation snap', 'rotationStep', 15, 1, 1);
+    addSnapControl('scale', 'Scale snap', 'scaleStep', 0.1, 0.001, 0.05);
+
+    group('Camera');
+    const cameraButtons = new Map();
+    [['Perspective', 'perspective'], ['Front', 'front'], ['Back', 'back'], ['Left', 'left'], ['Right', 'right'], ['Top', 'top'], ['Bottom', 'bottom']].forEach(([label, view]) => {
+        cameraButtons.set(view, button(label, () => {
+            cameraButtons.forEach((element, key) => element.classList.toggle('selected', key === view));
+            options.onSetCameraView?.(view);
+        }));
+    });
+    cameraButtons.get('perspective').classList.add('selected');
+
+    group('Display');
+    const renderButtons = new Map();
+    [['Wireframe', 'wireframe'], ['Solid', 'solid'], ['Material', 'material'], ['Anime', 'anime']].forEach(([label, mode]) => {
+        renderButtons.set(mode, button(label, () => {
+            renderButtons.forEach((element, key) => element.classList.toggle('selected', key === mode));
+            options.onSetRenderMode?.(mode);
+        }));
+    });
+    renderButtons.get('anime').classList.add('selected');
+
     group('View & Scene');
     button('Center View', onResetCamera);
     button('Export', onExport);
+    const sceneControls = document.createElement('div');
+    sceneControls.className = 'scene-controls';
+    activeToolGroup.appendChild(sceneControls);
+    const createSceneSelect = label => {
+        const select = document.createElement('select');
+        select.className = 'editor-input scene-wide';
+        select.setAttribute('aria-label', label);
+        sceneControls.appendChild(select);
+        return select;
+    };
+    const createSceneButton = (label, action, success) => {
+        const element = document.createElement('button');
+        element.className = 'editor-button';
+        element.type = 'button';
+        element.textContent = label;
+        element.addEventListener('click', () => runSceneAction(action, success));
+        sceneControls.appendChild(element);
+        return element;
+    };
+    const sceneSelect = createSceneSelect('Active scene');
+    const referenceTarget = createSceneSelect('Scene to reference');
+    const referenceSelect = createSceneSelect('Referenced scene');
+    const subSceneTarget = createSceneSelect('Sub-scene to load');
+    const sceneStatus = document.createElement('output');
+    sceneStatus.className = 'scene-status';
+    sceneControls.appendChild(sceneStatus);
+    const addReferenceButton = createSceneButton('Add Reference', () => sceneActions.addReference?.(referenceTarget.value), 'Scene reference added');
+    const removeReferenceButton = createSceneButton('Remove Reference', () => sceneActions.removeReference?.(referenceSelect.value), 'Scene reference removed');
+    const addSubSceneButton = createSceneButton('Add Sub-scene', () => sceneActions.addSubScene?.(subSceneTarget.value, streamingInput.checked), 'Sub-scene linked');
+    const streamSubSceneButton = createSceneButton('Load Sub-scene', () => sceneActions.toggleSubScene?.(subSceneTarget.value), 'Sub-scene state updated');
+    const newSceneButton = createSceneButton('New Scene', () => sceneActions.create?.(), 'Scene created');
+    const saveSceneButton = createSceneButton('Save Scene', () => sceneActions.save?.(), 'Scene saved');
+    const duplicateSceneButton = createSceneButton('Duplicate', () => sceneActions.duplicate?.(), 'Scene duplicated');
+    const deleteSceneButton = createSceneButton('Delete Scene', () => sceneActions.delete?.(), 'Scene deleted');
+    const streamingLabel = document.createElement('label');
+    streamingLabel.className = 'check-row';
+    const streamingInput = document.createElement('input');
+    streamingInput.type = 'checkbox';
+    streamingInput.checked = true;
+    streamingLabel.append(streamingInput, document.createTextNode('Stream on demand'));
+    sceneControls.appendChild(streamingLabel);
+    const loadSceneLabel = document.createElement('label');
+    loadSceneLabel.className = 'editor-button';
+    loadSceneLabel.textContent = 'Import Scene';
+    const loadSceneInput = document.createElement('input');
+    loadSceneInput.type = 'file';
+    loadSceneInput.accept = '.json,application/json';
+    loadSceneInput.hidden = true;
+    loadSceneInput.addEventListener('change', () => {
+        const file = loadSceneInput.files?.[0];
+        if (file) runSceneAction(() => sceneActions.loadFile?.(file), 'Scene imported');
+        loadSceneInput.value = '';
+    });
+    loadSceneLabel.appendChild(loadSceneInput);
+    sceneControls.appendChild(loadSceneLabel);
+    sceneSelect.addEventListener('change', () => runSceneAction(() => sceneActions.switch?.(sceneSelect.value), 'Scene switched'));
+
+    function refreshScenes() {
+        const records = sceneActions.list?.() || [];
+        const activeId = sceneActions.activeId?.() || '';
+        const activeRecord = records.find(record => record.id === activeId);
+        const fill = (select, entries, selectedId, placeholder) => {
+            select.innerHTML = '';
+            if (!entries.length) {
+                const empty = document.createElement('option');
+                empty.value = '';
+                empty.textContent = placeholder;
+                select.appendChild(empty);
+            }
+            entries.forEach(record => {
+                const option = document.createElement('option');
+                option.value = record.id;
+                option.textContent = record.name;
+                select.appendChild(option);
+            });
+            if (entries.some(record => record.id === selectedId)) select.value = selectedId;
+        };
+        fill(sceneSelect, records, activeId, 'No scenes');
+        fill(referenceTarget, records.filter(record => record.id !== activeId), referenceTarget.value, 'No other scenes');
+        const referencedRecords = (activeRecord?.references || []).map(id => records.find(record => record.id === id)).filter(Boolean);
+        fill(referenceSelect, referencedRecords, referenceSelect.value, 'No references');
+        const subSceneRecords = records.filter(record => record.id !== activeId);
+        fill(subSceneTarget, subSceneRecords, subSceneTarget.value, 'No available sub-scenes');
+        const subScene = sceneActions.subSceneState?.(subSceneTarget.value);
+        streamSubSceneButton.textContent = subScene?.loaded ? 'Unload Sub-scene' : 'Load Sub-scene';
+        streamSubSceneButton.disabled = !subScene;
+        addSubSceneButton.disabled = !subSceneTarget.value || !!subScene;
+        addReferenceButton.disabled = !referenceTarget.value || !!activeRecord?.references.includes(referenceTarget.value);
+        removeReferenceButton.disabled = !referenceSelect.value;
+        deleteSceneButton.disabled = records.length <= 1;
+        saveSceneButton.disabled = !activeId;
+        duplicateSceneButton.disabled = !activeId;
+    }
+
+    async function runSceneAction(action, success) {
+        try {
+            if (typeof action !== 'function') return;
+            await action();
+            sceneStatus.textContent = success;
+        } catch (error) {
+            sceneStatus.textContent = `Scene operation failed: ${error.message || error}`;
+        }
+        refreshScenes();
+    }
+
+    [referenceTarget, referenceSelect, subSceneTarget].forEach(select => select.addEventListener('change', refreshScenes));
+    refreshScenes();
     const uvWorkspace = document.createElement('div');
     uvWorkspace.className = 'uv-workspace';
     const uvTitle = document.createElement('h2');
@@ -553,20 +794,35 @@ export function createUI(root, options) {
         if (uvCanvas.hasPointerCapture(event.pointerId)) uvCanvas.releasePointerCapture(event.pointerId);
     });
 
-    ['face', 'vertex', 'mesh', 'orbit'].forEach(mode => {
+    const modeLabels = new Map([['vertex', 'Vertex'], ['edge', 'Edge'], ['face', 'Face'], ['mesh', 'Object'], ['orbit', 'Orbit']]);
+    ['vertex', 'edge', 'face', 'mesh', 'orbit'].forEach(mode => {
         const modeButton = document.createElement('button');
         modeButton.className = 'editor-button' + (mode === 'face' ? ' selected' : '');
         modeButton.type = 'button';
-        modeButton.textContent = mode[0].toUpperCase() + mode.slice(1);
+        modeButton.textContent = modeLabels.get(mode);
         modeButton.dataset.pickMode = mode;
         modeButton.addEventListener('click', () => {
             onSetPickMode(mode);
-            container.classList.toggle('uv-mode', mode === 'mesh');
-            if (mode === 'mesh') drawUvWorkspace();
+            options.onSetTransformTool?.('select');
+            transformButtons.forEach((element, key) => element.classList.toggle('selected', key === 'select'));
+            container.classList.remove('uv-mode');
+            uvModeButton.classList.remove('selected');
             toolbar.querySelectorAll('[data-pick-mode]').forEach(button => button.classList.toggle('selected', button.dataset.pickMode === mode));
         });
         modeButtons.appendChild(modeButton);
     });
+    const uvModeButton = document.createElement('button');
+    uvModeButton.className = 'editor-button';
+    uvModeButton.type = 'button';
+    uvModeButton.textContent = 'UV';
+    uvModeButton.title = 'Toggle UV workspace';
+    uvModeButton.addEventListener('click', () => {
+        const active = !container.classList.contains('uv-mode');
+        container.classList.toggle('uv-mode', active);
+        uvModeButton.classList.toggle('selected', active);
+        if (active) drawUvWorkspace();
+    });
+    modeButtons.appendChild(uvModeButton);
     container.appendChild(toolbar);
     container.appendChild(uvWorkspace);
 
@@ -578,34 +834,64 @@ export function createUI(root, options) {
         onSelect,
         onDelete,
         onReorder: onReorderMesh,
-        getSelected: () => selectedMesh
+        getSelected: () => selectedMesh,
+        getSelectedItems: () => options.getSelectedItems?.() || []
     });
     const inspector = createInspectorPanel(options.gl, options.textureLibrary, onSelectFace, onHistory);
-    const assets = createAssetsPanel(options.textureLibrary, onImportMesh, onImportTexture);
+    const assets = createAssetsPanel(options.textureLibrary, onImportMesh, onImportTexture, options.prefabActions);
     const bones = createBonesPanel({ onAddBone, onRemoveBone, onCreateAnimation, onKeyPose, onDeleteBoneKeys, onSeekAnimation, onToggleAnimation, onRenameAnimation, onSetAnimationDuration, onHistory });
     if (!scene.light) scene.light = new DirectionalLight();
     const lighting = createLightingPanel(scene.light, onHistory);
 
+    const layoutStorageKey = 'lightweight-3d-layout';
+    const panelDefaults = {
+        hierarchy: { dock: 'hierarchy', open: true },
+        inspector: { dock: 'inspector', open: true },
+        assets: { dock: 'assets', open: true },
+        'rig-and-animation': { dock: 'animation', open: true },
+        'key-light': { dock: 'inspector', open: false, floating: true }
+    };
+    let savedLayout = {};
+    try { savedLayout = JSON.parse(localStorage.getItem(layoutStorageKey) || '{}'); } catch {}
+    const persistPanelLayout = disclosure => {
+        try {
+            const layout = JSON.parse(localStorage.getItem(layoutStorageKey) || '{}');
+            const rect = disclosure.getBoundingClientRect();
+            layout[disclosure.dataset.panel] = {
+                dock: disclosure.dataset.dock,
+                floating: disclosure.dataset.floating === 'true',
+                open: disclosure.open,
+                ...(disclosure.dataset.floating === 'true' ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : {})
+            };
+            localStorage.setItem(layoutStorageKey, JSON.stringify(layout));
+        } catch {}
+    };
+
     const panelDisclosure = (label, element, index) => {
         const disclosure = document.createElement('details');
         disclosure.className = 'panel-disclosure';
-        disclosure.open = false;
-        disclosure.style.top = `${92 + index * 42}px`;
-        disclosure.style.right = '12px';
-        const positionKey = `lightweight-3d-panel:${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+        const panelKey = label.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        const defaults = panelDefaults[panelKey] || { dock: 'assets', open: false };
+        const savedPanel = savedLayout[panelKey];
+        const positionKey = `lightweight-3d-panel:${panelKey}`;
+        let legacyPosition = null;
         try {
-            const savedPosition = JSON.parse(localStorage.getItem(positionKey) || 'null');
-            if (Number.isFinite(savedPosition?.left) && Number.isFinite(savedPosition?.top)) {
-                disclosure.style.left = `${Math.max(0, Math.min(window.innerWidth - 120, savedPosition.left))}px`;
-                disclosure.style.right = 'auto';
-                disclosure.style.top = `${Math.max(0, Math.min(window.innerHeight - 36, savedPosition.top))}px`;
-            }
-            if (Number.isFinite(savedPosition?.width)) disclosure.style.width = `${Math.max(220, Math.min(window.innerWidth - 24, savedPosition.width))}px`;
-            if (Number.isFinite(savedPosition?.height)) {
-                disclosure.style.height = `${Math.max(120, Math.min(window.innerHeight - 24, savedPosition.height))}px`;
-                disclosure.dataset.resized = 'true';
-            }
+            legacyPosition = JSON.parse(localStorage.getItem(positionKey) || 'null');
         } catch {}
+        disclosure.dataset.panel = panelKey;
+        disclosure.dataset.dock = savedPanel?.dock || defaults.dock;
+        const isFloating = typeof savedPanel?.floating === 'boolean' ? savedPanel.floating : !!legacyPosition || !!defaults.floating;
+        disclosure.dataset.floating = String(isFloating);
+        disclosure.open = typeof savedPanel?.open === 'boolean' ? savedPanel.open : defaults.open;
+        if (isFloating) {
+            const position = savedPanel || legacyPosition || {};
+            disclosure.style.top = `${Math.max(8, Math.min(window.innerHeight - 44, Number(position.top) || 64 + index * 42))}px`;
+            disclosure.style.right = Number.isFinite(position.left) ? 'auto' : '12px';
+            if (Number.isFinite(position.left)) disclosure.style.left = `${Math.max(0, Math.min(window.innerWidth - 120, position.left))}px`;
+            if (Number.isFinite(position.width)) disclosure.style.width = `${Math.max(220, Math.min(window.innerWidth - 16, position.width))}px`;
+            if (Number.isFinite(position.height)) disclosure.style.height = `${Math.max(120, Math.min(window.innerHeight - 16, position.height))}px`;
+        }
+        disclosure.addEventListener('toggle', () => persistPanelLayout(disclosure));
         const summary = document.createElement('summary');
         const title = document.createElement('span');
         title.textContent = label;
@@ -621,11 +907,15 @@ export function createUI(root, options) {
             event.stopPropagation();
             const rect = disclosure.getBoundingClientRect();
             dragHandle.setPointerCapture(event.pointerId);
+            disclosure.dataset.floating = 'true';
             disclosure.dataset.dragPointer = String(event.pointerId);
             disclosure.dataset.dragX = String(event.clientX - rect.left);
             disclosure.dataset.dragY = String(event.clientY - rect.top);
             disclosure.style.right = 'auto';
             disclosure.style.left = `${rect.left}px`;
+            disclosure.style.top = `${rect.top}px`;
+            disclosure.style.width = `${rect.width}px`;
+            disclosure.style.height = `${rect.height}px`;
         });
         dragHandle.addEventListener('pointermove', event => {
             if (disclosure.dataset.dragPointer !== String(event.pointerId)) return;
@@ -641,12 +931,21 @@ export function createUI(root, options) {
             delete disclosure.dataset.dragPointer;
             delete disclosure.dataset.dragX;
             delete disclosure.dataset.dragY;
-            try {
-                const rect = disclosure.getBoundingClientRect();
-                const savedPosition = { left: rect.left, top: rect.top };
-                if (disclosure.dataset.resized) Object.assign(savedPosition, { width: rect.width, height: rect.height });
-                localStorage.setItem(positionKey, JSON.stringify(savedPosition));
-            } catch {}
+            const dock = event.clientX < 36 ? 'hierarchy'
+                : event.clientX > window.innerWidth - 36 ? 'inspector'
+                    : event.clientY > window.innerHeight - 36 ? (event.clientX < window.innerWidth / 2 ? 'assets' : 'animation')
+                        : null;
+            if (dock) {
+                const occupied = Array.from(panels.children).find(panel => panel !== disclosure && panel.dataset.dock === dock && panel.dataset.floating !== 'true');
+                if (occupied) {
+                    occupied.dataset.dock = disclosure.dataset.dock;
+                    persistPanelLayout(occupied);
+                }
+                disclosure.dataset.dock = dock;
+                disclosure.dataset.floating = 'false';
+                ['left', 'top', 'right', 'width', 'height'].forEach(property => disclosure.style.removeProperty(property));
+            }
+            persistPanelLayout(disclosure);
         };
         dragHandle.addEventListener('pointerup', finishPanelDrag);
         dragHandle.addEventListener('pointercancel', finishPanelDrag);
@@ -656,7 +955,7 @@ export function createUI(root, options) {
         resizeHandle.title = `Drag to resize ${label} panel`;
         resizeHandle.setAttribute('aria-label', `Resize ${label} panel`);
         resizeHandle.addEventListener('pointerdown', event => {
-            if (event.button !== 0 || !disclosure.open) return;
+            if (event.button !== 0 || !disclosure.open || disclosure.dataset.floating !== 'true') return;
             event.preventDefault();
             event.stopPropagation();
             const rect = disclosure.getBoundingClientRect();
@@ -684,11 +983,7 @@ export function createUI(root, options) {
             if (disclosure.dataset.resizePointer !== String(event.pointerId)) return;
             ['resizePointer', 'resizeX', 'resizeY', 'resizeWidth', 'resizeHeight'].forEach(key => delete disclosure.dataset[key]);
             disclosure.dataset.resized = 'true';
-            try {
-                const rect = disclosure.getBoundingClientRect();
-                const savedPosition = JSON.parse(localStorage.getItem(positionKey) || '{}');
-                localStorage.setItem(positionKey, JSON.stringify({ ...savedPosition, left: rect.left, top: rect.top, width: rect.width, height: rect.height }));
-            } catch {}
+            persistPanelLayout(disclosure);
         };
         resizeHandle.addEventListener('pointerup', finishPanelResize);
         resizeHandle.addEventListener('pointercancel', finishPanelResize);
@@ -701,6 +996,22 @@ export function createUI(root, options) {
     panels.appendChild(panelDisclosure('Assets', assets.element, 2));
     panels.appendChild(panelDisclosure('Rig and Animation', bones.element, 3));
     panels.appendChild(panelDisclosure('Key Light', lighting.element, 4));
+    saveCurrentLayout = () => panels.querySelectorAll('.panel-disclosure').forEach(persistPanelLayout);
+    resetCurrentLayout = () => {
+        try { localStorage.removeItem(layoutStorageKey); } catch {}
+        panels.querySelectorAll('.panel-disclosure').forEach(disclosure => {
+            const defaults = panelDefaults[disclosure.dataset.panel] || { dock: 'assets', open: false };
+            disclosure.dataset.dock = defaults.dock;
+            disclosure.dataset.floating = String(!!defaults.floating);
+            disclosure.open = defaults.open;
+            ['left', 'top', 'right', 'width', 'height'].forEach(property => disclosure.style.removeProperty(property));
+            if (defaults.floating) {
+                disclosure.style.top = '64px';
+                disclosure.style.right = '12px';
+            }
+        });
+        saveCurrentLayout();
+    };
 
     return {
         setSelected: mesh => { selectedMesh = mesh; inspector.setMesh(mesh); bones.setMesh(mesh); refreshUvTextures(); refreshUvTransformControls(); refreshFaceImageControls(); drawUvWorkspace(); },
@@ -709,14 +1020,23 @@ export function createUI(root, options) {
         refreshBones: bones.refresh,
         setInternalFps: (fps, frameMs) => { fpsReadout.textContent = `Internal FPS ${Math.round(fps)} | ${frameMs.toFixed(2)} ms`; },
         setPolygonCount: (current, total) => { polygonReadout.textContent = `Current Mesh Polygons / All Polygons: ${current} / ${total}`; },
+        setViewportStats: stats => {
+            if (!stats) return;
+            viewportStats.textContent = `Draw calls ${stats.drawCalls} | Triangles ${stats.triangles} | Objects ${stats.objects}`;
+        },
+        setStatus: message => { operatorStatus.textContent = message; },
+        setCameraView: view => cameraButtons.forEach((element, key) => element.classList.toggle('selected', key === view)),
         refreshTextures: () => { assets.refresh(); inspector.refresh(); refreshUvTextures(); },
+        refreshPrefabs: assets.refreshPrefabs,
+        refreshScenes,
         refreshLight: lighting.refresh,
         updateUvWorkspace: drawUvWorkspace,
         updateAnimationWorkspace: (time, playing) => bones.updatePlayback(time, playing),
         setPickMode: mode => {
             onSetPickMode(mode);
-            container.classList.toggle('uv-mode', mode === 'mesh');
-            if (mode === 'mesh') drawUvWorkspace();
+            container.classList.remove('uv-mode');
+            uvModeButton.classList.remove('selected');
+            toolbar.querySelectorAll('[data-pick-mode]').forEach(button => button.classList.toggle('selected', button.dataset.pickMode === mode));
         }
     };
 

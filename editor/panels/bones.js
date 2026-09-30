@@ -207,7 +207,7 @@ export function createBonesPanel({ onAddBone, onRemoveBone, onCreateAnimation, o
             ? `Vertex ${selectedVertex.vertexIndex + 1} on face ${selectedVertex.faceIndex + 1}`
             : 'Select a vertex in Vertex mode first.';
         weightGroup.appendChild(weightLabel);
-        const skin = selectedVertex && mesh.vertexWeights.get(mesh.polygons[selectedVertex.faceIndex]?.[selectedVertex.vertexIndex]);
+        const skin = selectedVertex && mesh.getVertexSkin(mesh.faces[selectedVertex.faceIndex]?.[selectedVertex.vertexIndex]);
         const weightSlider = document.createElement('input');
         weightSlider.className = 'editor-input';
         weightSlider.type = 'range';

@@ -42,6 +42,7 @@ async function init() {
     editor = new Editor(scene, camera, renderer);
     if (tex) editor.textureLibrary.addTexture('example.webp', tex, './assets/textures/example.webp');
     editor.ui.refreshTextures();
+    await editor.initializeScenes();
     loop();
 }
 
