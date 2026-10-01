@@ -61,15 +61,20 @@ async function init() {
                 viewMode: camera.viewMode
             };
 
+            // Start near city plaza for exploration
+            camera.position = [-150, 1.7, 18];
+            camera.target = [-150, 1.5, 0];
+            camera.far = 600;
+
             runtime = new GameRuntime(renderer, scene, camera, {
                 onUpdate: () => {}
             });
 
             runtime.enableFirstPersonCamera({
-                speed: 7,
-                sprintMultiplier: 1.8,
+                speed: 8,
+                sprintMultiplier: 1.9,
                 eyeHeight: 1.7,
-                radius: 0.35,
+                radius: 0.4,
                 gravity: -24,
                 jumpSpeed: 9,
                 mouseSensitivity: 0.0022
@@ -83,7 +88,7 @@ async function init() {
 
             runtime.play();
             editor.ui?.setStatus?.(
-                'Play mode — WASD walk, Space jump, Shift sprint, click to lock mouse look. Esc exits.'
+                'Play mode — WASD walk, arrows look, Space jump, Shift sprint, click lock mouse. Esc exits.'
             );
             const ui = document.getElementById('ui-root');
             if (ui) {

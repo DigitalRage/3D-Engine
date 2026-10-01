@@ -205,26 +205,34 @@ export class GameRuntime {
             this.input.mouseDelta[0] = 0;
             this.input.mouseDelta[1] = 0;
 
+            // Arrow keys = camera look (easier without mouse)
+            const lookSpeed = 1.6 * dt;
+            if (this.input.isDown('ArrowLeft')) state.yaw += lookSpeed;
+            if (this.input.isDown('ArrowRight')) state.yaw -= lookSpeed;
+            if (this.input.isDown('ArrowUp')) state.pitch = Math.min(1.45, state.pitch + lookSpeed);
+            if (this.input.isDown('ArrowDown')) state.pitch = Math.max(-1.45, state.pitch - lookSpeed);
+
+            // Horizontal basis from yaw (fixed so A=left, D=right from player view)
             const forward = [Math.sin(state.yaw), 0, Math.cos(state.yaw)];
-            const right = [Math.cos(state.yaw), 0, -Math.sin(state.yaw)];
+            const right = [-Math.cos(state.yaw), 0, Math.sin(state.yaw)];
 
             let moveX = 0;
             let moveZ = 0;
-            if (this.input.isDown('KeyW') || this.input.isDown('ArrowUp')) {
+            if (this.input.isDown('KeyW')) {
                 moveX += forward[0];
                 moveZ += forward[2];
             }
-            if (this.input.isDown('KeyS') || this.input.isDown('ArrowDown')) {
+            if (this.input.isDown('KeyS')) {
                 moveX -= forward[0];
                 moveZ -= forward[2];
             }
-            if (this.input.isDown('KeyA') || this.input.isDown('ArrowLeft')) {
-                moveX -= right[0];
-                moveZ -= right[2];
-            }
-            if (this.input.isDown('KeyD') || this.input.isDown('ArrowRight')) {
+            if (this.input.isDown('KeyA')) {
                 moveX += right[0];
                 moveZ += right[2];
+            }
+            if (this.input.isDown('KeyD')) {
+                moveX -= right[0];
+                moveZ -= right[2];
             }
 
             const len = Math.hypot(moveX, moveZ);
