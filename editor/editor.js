@@ -178,7 +178,7 @@ export class Editor {
             const record = await this.sceneManager.createScene(this.scene.name, data, { id: this.scene.assetId });
             record.data.sceneAssetId = record.id;
             this.scene.assetId = record.id;
-            this.sceneManager.persist();
+            try { this.sceneManager.persist(); } catch (e) { console.warn("Scene storage skipped:", e); }
         } else {
             await this.sceneManager.initializeActiveScene();
         }
@@ -198,7 +198,7 @@ export class Editor {
             meshes: []
         });
         record.data.sceneAssetId = record.id;
-        this.sceneManager.persist();
+        try { this.sceneManager.persist(); } catch (e) { console.warn("Scene storage skipped:", e); }
         await this.sceneManager.loadScene(record.id);
         this.ui.refreshScenes();
         return record;
@@ -243,7 +243,7 @@ export class Editor {
             loaded: false
         }));
         try {
-            this.sceneManager.persist();
+            try { this.sceneManager.persist(); } catch (e) { console.warn("Scene storage skipped:", e); }
         } catch (error) {
             console.warn('Scene imported in memory, but browser storage could not save it:', error);
         }
@@ -627,7 +627,7 @@ export class Editor {
             replacements.push([mesh, updatedData]);
         }
         for (const [mesh, data] of replacements) await this.replaceMeshFromPrefabData(mesh, data);
-        this.sceneManager.persist();
+        try { this.sceneManager.persist(); } catch (e) { console.warn("Scene storage skipped:", e); }
         this.refreshSceneAssets();
         this.ui.refreshPrefabs();
         return prefab;

@@ -25,6 +25,9 @@ let measuredWorkMs = 0;
 let savedCamera = null;
 
 async function init() {
+    // Clear poisoned oversized scene cache from previous Chrome sessions
+    try { localStorage.removeItem("lightweight-3d-scenes"); } catch (e) { /* ignore */ }
+
     await renderer.ready;
 
     let tex = null;
