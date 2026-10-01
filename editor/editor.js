@@ -242,7 +242,11 @@ export class Editor {
             streaming: entry.streaming !== false,
             loaded: false
         }));
-        this.sceneManager.persist();
+        try {
+            this.sceneManager.persist();
+        } catch (error) {
+            console.warn('Scene imported in memory, but browser storage could not save it:', error);
+        }
         await this.sceneManager.loadScene(record.id);
         this.ui.refreshScenes();
         return record;

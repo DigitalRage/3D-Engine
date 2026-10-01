@@ -246,27 +246,82 @@ export class SceneManager {
     }
 
     persist() {
-        if (!this.storage) return false;
         const document = {
             version: SCENE_STORAGE_VERSION,
             activeSceneId: this.activeSceneId,
             scenes: [...this.scenes.values()].map(scene => ({
                 id: scene.id,
                 name: scene.name,
-                data: scene.data,
+                // Strip heavy texture binaries so large city scenes fit in browser storage
+                data: slimSceneDataForStorage(scene.data),
                 references: scene.references,
                 subScenes: scene.subScenes,
                 updatedAt: scene.updatedAt
             }))
         };
-        try {
-            this.storage.setItem(this.storageKey, JSON.stringify(document));
-            return true;
-        } catch (error) {
-            throw new Error(`Could not save scenes to local storage: ${error.message || error}`);
+        const payload = JSON.stringify(document);
+
+        // Prefer localStorage; fall back gracefully when quota is exceeded (common in Chrome).
+        if (this.storage) {
+            try {
+                this.storage.setItem(this.storageKey, payload);
+                return true;
+            } catch (error) {
+                const message = String(error?.message || error);
+                const quota = /quota|exceeded|full/i.test(message);
+                console.warn(
+                    quota
+                        ? 'Scene is too large for localStorage (Chrome quota). Keeping it in memory only for this session.'
+                        : `Could not save scenes to localStorage: ${message}`
+                );
+                // Try to free space and store a lightweight index only
+                try {
+                    const light = {
+                        version: SCENE_STORAGE_VERSION,
+                        activeSceneId: this.activeSceneId,
+                        scenes: [...this.scenes.values()].map(scene => ({
+                            id: scene.id,
+                            name: scene.name,
+                            data: { format: 'lightweight-3d-scene', version: 1, sceneName: scene.name, meshes: [], textureAssets: [], light: scene.data?.light || null },
+                            references: scene.references,
+                            subScenes: scene.subScenes,
+                            updatedAt: scene.updatedAt,
+                            storageSkipped: true
+                        }))
+                    };
+                    this.storage.setItem(this.storageKey, JSON.stringify(light));
+                } catch {
+                    try { this.storage.removeItem(this.storageKey); } catch { /* ignore */ }
+                }
+                return false;
+            }
         }
+        return false;
     }
 }
+
+/** Remove base64 texture payloads and other bulky fields before writing to localStorage. */
+function slimSceneDataForStorage(data) {
+    if (!data || typeof data !== 'object') return data;
+    const copy = cloneJson(data);
+    if (Array.isArray(copy.textureAssets)) {
+        copy.textureAssets = copy.textureAssets.map(asset => {
+            if (!asset || typeof asset !== 'object') return asset;
+            const { data: _binary, thumbnail, ...rest } = asset;
+            return { ...rest, data: null, thumbnail: null, storageOmitted: true };
+        });
+    }
+    // Asset manifest data blobs are unused for runtime meshes and can be huge
+    if (copy.assetManifest && Array.isArray(copy.assetManifest.assets)) {
+        copy.assetManifest.assets = copy.assetManifest.assets.map(asset => {
+            if (!asset || typeof asset !== 'object') return asset;
+            const { data: _d, thumbnail, ...rest } = asset;
+            return { ...rest, data: null, thumbnail: null };
+        });
+    }
+    return copy;
+}
+
 
 function duplicateSceneAssetIds(data) {
     const manifest = data.assetManifest;
