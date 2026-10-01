@@ -149,8 +149,11 @@ export function createInspectorPanel(gl, textureLibrary, onSelectFace, onHistory
         });
         info.appendChild(faceButtons);
 
-        const polygon = currentMesh.polygons[currentFace] || [];
-        polygon.forEach((vertexValue, vertexIndex) => {
+        const sharedVertexTitle = document.createElement('div');
+        sharedVertexTitle.className = 'panel-title';
+        sharedVertexTitle.textContent = `Shared vertices (${currentMesh.positions.length})`;
+        info.appendChild(sharedVertexTitle);
+        currentMesh.positions.forEach((vertexValue, vertexIndex) => {
             const vertex = document.createElement('div');
             vertex.className = 'field-group';
             const label = document.createElement('div');
@@ -168,9 +171,9 @@ export function createInspectorPanel(gl, textureLibrary, onSelectFace, onHistory
                 input.value = value;
                 input.addEventListener('input', () => {
                     onHistory();
-                    const vertex = [...currentMesh.polygons[currentFace][vertexIndex]];
-                    vertex[axis] = Number(input.value) || 0;
-                    currentMesh.setFaceVertex(currentFace, vertexIndex, vertex);
+                    const position = [...currentMesh.positions[vertexIndex]];
+                    position[axis] = Number(input.value) || 0;
+                    currentMesh.setVertexPosition(vertexIndex, position);
                 });
                 fields.appendChild(input);
             }

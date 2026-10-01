@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flat Shaded 3D Engine – User Manual</title>
+  <style>
+    :root {
+      --bg: #12141c; --panel: #1a1d28; --text: #e8eaf0; --muted: #9aa3b5;
+      --accent: #63a9f0; --accent2: #74d48a; --warn: #f0c36a; --border: #2a3040;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.55; }
+    header { background: linear-gradient(135deg, #1a1d28, #161a26); border-bottom: 1px solid var(--border); padding: 1.5rem 2rem; position: sticky; top: 0; z-index: 10; }
+    header h1 { margin: 0 0 0.25rem; font-size: 1.5rem; }
+    header p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+    .layout { display: grid; grid-template-columns: 220px 1fr; min-height: calc(100vh - 88px); }
+    nav { background: var(--panel); border-right: 1px solid var(--border); padding: 1.25rem 1rem; position: sticky; top: 88px; height: calc(100vh - 88px); overflow: auto; }
+    nav a { display: block; color: var(--muted); text-decoration: none; padding: 0.35rem 0.5rem; border-radius: 6px; font-size: 0.9rem; }
+    nav a:hover { color: var(--text); background: #222636; }
+    nav .section { margin-top: 1rem; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: #6b7388; padding: 0 0.5rem; }
+    main { padding: 2rem 2.5rem 4rem; max-width: 860px; }
+    h2 { margin-top: 2.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; color: var(--accent); }
+    h3 { margin-top: 1.5rem; color: var(--accent2); }
+    code, kbd { font-family: ui-monospace, monospace; background: #0e1018; border: 1px solid var(--border); border-radius: 4px; padding: 0.1em 0.35em; font-size: 0.88em; }
+    kbd { border-bottom-width: 2px; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.92rem; }
+    th, td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; }
+    th { background: #161a26; color: var(--muted); }
+    .tip { background: #1a2430; border-left: 3px solid var(--accent); padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 8px 8px 0; }
+    .warn { background: #2a2218; border-left: 3px solid var(--warn); padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 8px 8px 0; }
+    ul { padding-left: 1.25rem; }
+    a { color: var(--accent); }
+    pre { background: #0e1018; border: 1px solid var(--border); padding: 1rem; overflow: auto; border-radius: 8px; }
+    @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } nav { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Flat Shaded 3D Engine</h1>
+    <p>User manual — anime-style editor &amp; lightweight game runtime</p>
+  </header>
+  <div class="layout">
+    <nav>
+      <div class="section">Start</div>
+      <a href="#intro">Introduction</a>
+      <a href="#quickstart">Quick start</a>
+      <a href="#shortcuts">Keyboard shortcuts</a>
+      <div class="section">Editor</div>
+      <a href="#modes">Selection modes</a>
+      <a href="#tools">Modeling tools</a>
+      <a href="#transforms">Transforms &amp; gizmos</a>
+      <a href="#scenes">Scenes &amp; prefabs</a>
+      <a href="#animation">Bones &amp; animation</a>
+      <div class="section">Look &amp; render</div>
+      <a href="#anime">Anime / toon shading</a>
+      <a href="#raytracing">Raytraced shadows</a>
+      <a href="#render-modes">Render modes</a>
+      <div class="section">Performance</div>
+      <a href="#large-scenes">Large scenes (1000+)</a>
+      <a href="#tips-perf">Performance tips</a>
+      <div class="section">Game mode</div>
+      <a href="#play">Play mode</a>
+      <a href="#runtime-api">Runtime API</a>
+      <div class="section">Reference</div>
+      <a href="#export">Import / export</a>
+      <a href="#troubleshooting">Troubleshooting</a>
+    </nav>
+    <main>
+      <h2 id="intro">Introduction</h2>
+      <p>This is a browser-based 3D editor built for a <strong>flat, anime / toon look</strong>. It includes mesh modeling, multi-scene management, prefabs, skeletal animation, and a simple <strong>game runtime</strong> so the same content can be played without the editor UI.</p>
+      <p>Rendering uses flat shading with optional textures. Directional <strong>raytraced hard shadows</strong> reinforce the cel-shaded aesthetic (automatically scaled back on very large scenes so the editor stays interactive).</p>
+
+      <h2 id="quickstart">Quick start</h2>
+      <ol>
+        <li>Serve the project folder with any static server (<code>npx serve .</code> or <code>python -m http.server</code>).</li>
+        <li>Open the page in a modern browser with WebGL.</li>
+        <li>A default cube is present. Use the toolbar / hierarchy / inspector panels.</li>
+        <li>Press <kbd>P</kbd> or <kbd>F5</kbd> to enter Play mode; <kbd>Esc</kbd> returns to the editor.</li>
+      </ol>
+      <div class="tip">If the UI looks missing, ensure you are not still in Play mode (UI is dimmed) and that the page was opened via <code>http://</code>, not <code>file://</code>.</div>
+
+      <h2 id="shortcuts">Keyboard shortcuts</h2>
+      <table>
+        <tr><th>Key</th><th>Action</th></tr>
+        <tr><td><kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> / <kbd>4</kbd></td><td>Vertex / Edge / Face / Object mode</td></tr>
+        <tr><td><kbd>G</kbd> / <kbd>R</kbd> / <kbd>S</kbd></td><td>Move / Rotate / Scale tool</td></tr>
+        <tr><td><kbd>E</kbd></td><td>Extrude selected face(s)</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>D</kbd></td><td>Duplicate selection</td></tr>
+        <tr><td><kbd>X</kbd></td><td>Delete (confirm)</td></tr>
+        <tr><td><kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd> while transforming</td><td>Axis lock</td></tr>
+        <tr><td>Numpad <kbd>1</kbd> / <kbd>3</kbd> / <kbd>7</kbd></td><td>Front / Right / Top camera views</td></tr>
+        <tr><td><kbd>P</kbd> or <kbd>F5</kbd></td><td>Toggle Play mode</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>Exit Play mode</td></tr>
+        <tr><td>Middle mouse / Shift+LMB drag</td><td>Pan</td></tr>
+        <tr><td>LMB drag (empty) / RMB</td><td>Orbit (perspective)</td></tr>
+        <tr><td>Scroll</td><td>Zoom</td></tr>
+      </table>
+
+      <h2 id="modes">Selection modes</h2>
+      <p>Use keys <kbd>1</kbd>–<kbd>4</kbd> or the UI pick-mode control. Face/edge/vertex picks support additive selection with Shift/Ctrl. Many modeling operators act on the current face selection set.</p>
+
+      <h2 id="tools">Modeling tools</h2>
+      <p>Available from the UI and (where bound) shortcuts: extrude, inset, bevel, loop cut, bridge, fill, grid fill, dissolve, split, separate, triangulate, quad rebuild, knife, add/merge vertices, merge coplanar faces, recalculate/flip normals.</p>
+      <p>Most face operators are undoable as a single mesh command.</p>
+
+      <h2 id="transforms">Transforms &amp; gizmos</h2>
+      <p>Select Move, Rotate, or Scale, then drag axis handles. World/local space and snap steps are available in the UI. Axis constraints can be toggled with <kbd>X</kbd>/<kbd>Y</kbd>/<kbd>Z</kbd> during a drag.</p>
+      <div class="tip">Transform updates are optimized: model matrices are cached and full scene asset rebuilds are deferred so dragging one object among thousands stays responsive.</div>
+
+      <h2 id="scenes">Scenes &amp; prefabs</h2>
+      <p>Create, save, duplicate, and switch scenes via the scene panel. Sub-scenes can stream in/out. Prefabs support nested prefabs, instantiate, update, and revert overrides.</p>
+
+      <h2 id="animation">Bones &amp; animation</h2>
+      <p>Add bones to a mesh skeleton, key position/rotation/scale on the animation clip, seek and play from the animation workspace. Skinning uses vertex weights on shared topology.</p>
+
+      <h2 id="anime">Anime / toon shading</h2>
+      <p>Materials default toward toon shading. The directional light exposes intensity, threshold, light color, and shade color — the classic two-tone cel look. Face colors and textures multiply on top of the lighting.</p>
+
+      <h2 id="raytracing">Raytraced shadows</h2>
+      <p>In <strong>Anime</strong> render mode, a BVH-accelerated raytracer casts hard shadows from the directional light onto toon-shaded faces. This is intentional for a clean anime silhouette, not soft photoreal contact shadows.</p>
+      <div class="warn">On scenes with more than ~800 meshes, full per-face raytraced shadows are automatically disabled so the frame rate stays usable. Toon lighting still applies; only the ray-shadow term is skipped.</div>
+
+      <h2 id="render-modes">Render modes</h2>
+      <ul>
+        <li><strong>Anime</strong> — toon + optional ray shadows (default aesthetic)</li>
+        <li><strong>Material</strong> — textured/lit without full toon treatment</li>
+        <li><strong>Solid</strong> — flat colors, no textures</li>
+        <li><strong>Wireframe</strong> — edges only (always draws every mesh; useful to verify object counts)</li>
+      </ul>
+
+      <h2 id="large-scenes">Large scenes (1000+ objects)</h2>
+      <p>Use <strong>Add batch</strong> for primitives. Creation yields to the browser so the UI stays responsive. The renderer uses:</p>
+      <ul>
+        <li>Frustum culling (when many objects exist)</li>
+        <li>GPU instancing for identical opaque meshes (chunked in groups of 512 to avoid GPU limits)</li>
+        <li>Cached model matrices</li>
+        <li>Deferred asset registration after mass add</li>
+      </ul>
+      <div class="tip">If only a few objects show in Anime/Solid but all show in Wireframe, switch render mode once or orbit the camera — frustum and instance batches will refresh. Prefer Wireframe to confirm the full set was created.</div>
+
+      <h2 id="tips-perf">Performance tips</h2>
+      <ul>
+        <li>Prefer identical primitives (same type/scale) so instancing can group them.</li>
+        <li>Avoid selecting thousands of meshes at once (hierarchy refresh cost).</li>
+        <li>Keep unique geometry counts down when possible; share shapes via duplication.</li>
+        <li>For game prototypes, use Play mode so editor overlays and gizmo work stop.</li>
+      </ul>
+
+      <h2 id="play">Play mode</h2>
+      <p>Press <kbd>P</kbd> or <kbd>F5</kbd>. The runtime takes over the loop, dims the editor UI, enables a fly camera, and can attach simple physics to cubes/spheres.</p>
+      <ul>
+        <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> — move</li>
+        <li><kbd>Q</kbd>/<kbd>E</kbd> — down / up</li>
+        <li>Mouse drag (RMB or Shift+LMB) — look</li>
+        <li><kbd>Esc</kbd> — back to editor</li>
+      </ul>
+
+      <h2 id="runtime-api">Runtime API</h2>
+      <pre><code>import { GameRuntime } from './engine/runtime.js';
+
+const runtime = new GameRuntime(renderer, scene, camera);
+runtime.enableFlyCamera(5);
+runtime.physics.addBody(mesh, { gravity: -12, radius: 0.5 });
+runtime.addScript('logic', (dt, rt) =&gt; { /* ... */ });
+runtime.play();
+</code></pre>
+
+      <h2 id="export">Import / export</h2>
+      <p>Scenes export as JSON (<code>lightweight-3d-scene</code> format) including meshes, materials, skeletons, animations, textures metadata, and scene references. Import via the scene file loader. Mesh JSON (vertices/faces) is also supported.</p>
+
+      <h2 id="troubleshooting">Troubleshooting</h2>
+      <table>
+        <tr><th>Symptom</th><th>What to try</th></tr>
+        <tr><td>Only a few objects visible after a large batch</td><td>Switch to Wireframe to confirm they exist; switch back to Anime. Orbit camera. Fixed in this build: safer frustum + chunked instancing + no shared Material object.</td></tr>
+        <tr><td>Editor lag while dragging one object</td><td>Update should be light; if not, reduce hierarchy size or avoid selecting huge sets.</td></tr>
+        <tr><td>No shadows on huge scenes</td><td>Expected above ~800 meshes — see Raytraced shadows.</td></tr>
+        <tr><td>Black / failed startup</td><td>Check browser console; WebGL required. Serve over HTTP.</td></tr>
+        <tr><td>Texture missing</td><td><code>example.webp</code> may be absent; the engine continues without it.</td></tr>
+      </table>
+
+      <p style="margin-top:3rem;color:var(--muted);font-size:0.85rem;">Flat Shaded 3D Engine — anime-first editor &amp; runtime. See also <a href="../README.md">README.md</a>.</p>
+    </main>
+  </div>
+</body>
+</html>

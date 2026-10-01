@@ -7,17 +7,32 @@ export function executeMeshCommand(editor, mesh, label, apply) {
         return false;
     }
 
-    editor.undoStack.push({
+    pushCommand(editor, {
         type: 'mesh-edit',
         label,
         mesh,
         undo: () => restoreMeshState(mesh, before),
         redo: () => restoreMeshState(mesh, after)
     });
-    if (editor.undoStack.length > editor.maxHistoryLength) editor.undoStack.shift();
-    editor.redoStack.length = 0;
     editor.ui.setStatus?.(`${label}: complete`);
     return true;
+}
+
+export function executeSceneCommand(editor, label, apply, undo, redo, hasChanges = Boolean) {
+    const result = apply();
+    if (!hasChanges(result)) {
+        editor.ui.setStatus?.(`${label}: no change`);
+        return false;
+    }
+    pushCommand(editor, { type: 'scene-edit', label, undo, redo });
+    editor.ui.setStatus?.(`${label}: complete`);
+    return true;
+}
+
+function pushCommand(editor, command) {
+    editor.undoStack.push(command);
+    if (editor.undoStack.length > editor.maxHistoryLength) editor.undoStack.shift();
+    editor.redoStack.length = 0;
 }
 
 export function captureMeshState(mesh) {

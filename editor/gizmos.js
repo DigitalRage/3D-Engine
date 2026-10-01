@@ -20,6 +20,7 @@ export class Gizmos {
         this.activeButton = 0;
         this.axisConstraint = null;
         this.modifierSelection = false;
+        this.hoveredAxis = null;
         this.distance = Math.hypot(...camera.position);
         this.yaw = Math.atan2(camera.position[0], camera.position[2]);
         this.pitch = Math.asin(camera.position[1] / this.distance);
@@ -33,12 +34,14 @@ export class Gizmos {
 
     bindEvents() {
         window.addEventListener('keydown', event => {
-            if (event.ctrlKey || event.metaKey || event.altKey || isTextInput(document.activeElement)) return;
+            if (!this.transformDrag || event.ctrlKey || event.metaKey || event.altKey || isTextInput(document.activeElement)) return;
             const axis = event.key.toLowerCase();
             if (!['x', 'y', 'z'].includes(axis)) return;
             this.axisConstraint = axis;
-            if (this.transformDrag) this.lockTransformAxis({ x: 0, y: 1, z: 2 }[axis]);
-        });
+            this.lockTransformAxis({ x: 0, y: 1, z: 2 }[axis]);
+            event.preventDefault();
+            event.stopImmediatePropagation();
+        }, { capture: true });
         window.addEventListener('keyup', event => {
             if (this.axisConstraint === event.key.toLowerCase()) this.axisConstraint = null;
         });
@@ -53,7 +56,9 @@ export class Gizmos {
             this.modifierSelection = event.shiftKey || event.ctrlKey || event.metaKey;
             const handle = event.button === 0 ? this.hitTransformHandle(event.clientX, event.clientY) : null;
             if (handle) {
-                this.transformDrag = this.beginTransformDrag(handle, event.clientX, event.clientY);
+                const lockedAxis = { x: 0, y: 1, z: 2 }[this.axisConstraint];
+                const activeHandle = Number.isInteger(lockedAxis) ? { ...handle, axis: lockedAxis } : handle;
+                this.transformDrag = this.beginTransformDrag(activeHandle, event.clientX, event.clientY);
                 this.activePick = null;
                 this.historySnapshot = this.callbacks.onHistoryStart?.();
                 this.canvas.setPointerCapture(event.pointerId);
@@ -70,7 +75,14 @@ export class Gizmos {
             this.canvas.setPointerCapture(event.pointerId);
         });
         this.canvas.addEventListener('pointermove', event => {
-            if (!this.dragging) return;
+            if (!this.dragging) {
+                const axis = this.hitTransformHandle(event.clientX, event.clientY)?.axis ?? null;
+                if (axis !== this.hoveredAxis) {
+                    this.hoveredAxis = axis;
+                    this.drawTransformGizmo();
+                }
+                return;
+            }
             const deltaX = event.clientX - this.lastX;
             const deltaY = event.clientY - this.lastY;
             this.moved = this.moved || Math.abs(deltaX) + Math.abs(deltaY) > 2;
@@ -107,6 +119,11 @@ export class Gizmos {
             else this.camera.orthographicHeight = Math.max(0.5, Math.min(100, this.camera.orthographicHeight * Math.exp(event.deltaY * 0.001)));
         }, { passive: false });
         this.canvas.addEventListener('contextmenu', event => event.preventDefault());
+        this.canvas.addEventListener('pointerleave', () => {
+            if (this.hoveredAxis === null) return;
+            this.hoveredAxis = null;
+            this.drawTransformGizmo();
+        });
     }
 
     setPickMode(mode) {
@@ -233,8 +250,9 @@ export class Gizmos {
         axes.forEach((points, axis) => {
             context.beginPath();
             points.forEach(([x, y], index) => index ? context.lineTo(x, y) : context.moveTo(x, y));
-            context.strokeStyle = this.axisConstraint === ['x', 'y', 'z'][axis] ? '#ffffff' : colors[axis];
-            context.lineWidth = this.axisConstraint === ['x', 'y', 'z'][axis] ? 5 : 3;
+            const highlighted = this.axisConstraint === ['x', 'y', 'z'][axis] || this.hoveredAxis === axis;
+            context.strokeStyle = highlighted ? '#ffffff' : colors[axis];
+            context.lineWidth = highlighted ? 5 : 3;
             context.stroke();
             if (this.transformTool === 'move' || this.transformTool === 'scale') {
                 const [startX, startY] = points[0];

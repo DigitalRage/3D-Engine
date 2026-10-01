@@ -88,3 +88,18 @@ test('legacy polygon JSON imports shared positions and corner UVs', () => {
     assert.deepEqual(mesh.faces, [[0, 1, 2], [0, 2, 3]]);
     assert.deepEqual(mesh.faceUvs[1][2], [0, 1]);
 });
+
+test('editing one shared vertex updates every incident face', () => {
+    const mesh = new Mesh(material());
+    mesh.setTopology(
+        [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]],
+        [[0, 1, 2], [0, 2, 3]]
+    );
+    mesh.rebuildRenderData();
+
+    mesh.setVertexPosition(0, [0.25, 0, 0]);
+
+    assert.deepEqual(mesh.positions[0], [0.25, 0, 0]);
+    assert.equal(mesh.polygons[0][0], mesh.polygons[1][0]);
+    assert.deepEqual(mesh.polygons[1][0], [0.25, 0, 0]);
+});

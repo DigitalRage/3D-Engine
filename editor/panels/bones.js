@@ -104,11 +104,22 @@ export function createBonesPanel({ onAddBone, onRemoveBone, onCreateAnimation, o
         parentLabel.className = 'inspector-empty field-group';
         parentLabel.textContent = `Parent: ${bone.parent?.name || 'Root'}`;
         panel.appendChild(parentLabel);
+        const bindPose = document.createElement('div');
+        bindPose.className = 'inspector-empty field-group';
+        const formatVector = values => `(${values.map(value => Number(value).toFixed(2)).join(', ')})`;
+        const refreshBindPose = () => {
+            const bindRotation = bone.bindRotation.map(value => value * 180 / Math.PI);
+            bindPose.textContent = `Bind/rest P ${formatVector(bone.bindPosition)} | R ${formatVector(bindRotation)} deg | S ${formatVector(bone.bindScale)}`;
+        };
+        refreshBindPose();
+        panel.appendChild(bindPose);
+        const editPoseLabel = mesh.animationClip ? 'Pose' : 'Bind/rest';
 
         ['X', 'Y', 'Z'].forEach((axis, index) => {
-            addNumber(`Joint position ${axis}`, bone.position[index], value => {
+            addNumber(`${editPoseLabel} position ${axis}`, bone.position[index], value => {
                 bone.position[index] = value;
                 if (!mesh.animationClip) bone.bindPosition[index] = value;
+                refreshBindPose();
                 onChange();
             }, '0.05', () => bone.position[index]);
         });
@@ -120,7 +131,7 @@ export function createBonesPanel({ onAddBone, onRemoveBone, onCreateAnimation, o
             labelRow.className = 'bone-slider-label';
             const label = document.createElement('span');
             label.className = 'field-label';
-            label.textContent = `Joint rotation ${axis}`;
+            label.textContent = `${editPoseLabel} rotation ${axis}`;
             const valueLabel = document.createElement('output');
             const degrees = Math.round(bone.rotation[index] * 180 / Math.PI);
             valueLabel.textContent = `${degrees} deg (${Math.round(Math.abs(degrees) / 180 * 100)}%)`;
@@ -137,6 +148,7 @@ export function createBonesPanel({ onAddBone, onRemoveBone, onCreateAnimation, o
                 const next = Number(slider.value);
                 bone.rotation[index] = next * Math.PI / 180;
                 if (!mesh.animationClip) bone.bindRotation[index] = bone.rotation[index];
+                refreshBindPose();
                 valueLabel.textContent = `${next} deg (${Math.round(Math.abs(next) / 180 * 100)}%)`;
                 onChange();
             });
@@ -187,9 +199,10 @@ export function createBonesPanel({ onAddBone, onRemoveBone, onCreateAnimation, o
         panel.appendChild(deleteBone);
 
         ['X', 'Y', 'Z'].forEach((axis, index) => {
-            addNumber(`Bone scale ${axis}`, bone.scale[index], value => {
+            addNumber(`${editPoseLabel} scale ${axis}`, bone.scale[index], value => {
                 bone.scale[index] = value;
                 if (!mesh.animationClip) bone.bindScale[index] = value;
+                refreshBindPose();
                 onChange();
             }, '0.01', () => bone.scale[index]);
         });

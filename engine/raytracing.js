@@ -1,9 +1,45 @@
+const shadowGeometryCache = new WeakMap();
+
 export function traceDirectionalShadowFaces(scene, light) {
     const shadowedFaces = new Map(scene.meshes.map(mesh => [mesh, Array(mesh.faceCount).fill(false)]));
     if (!light || !scene.meshes.some(mesh => mesh.material.shading === 'toon')) return shadowedFaces;
 
     const lightDirection = normalize(light.direction.map(value => -value));
     if (!lightDirection) return shadowedFaces;
+
+    const cachedGeometry = getCachedShadowGeometry(scene);
+    const { worldPolygons, bvh } = cachedGeometry;
+    if (!bvh) return shadowedFaces;
+
+    scene.meshes.forEach(mesh => {
+        if (mesh.material.shading !== 'toon') return;
+        const polygons = worldPolygons.get(mesh);
+        const faceShadows = shadowedFaces.get(mesh);
+        polygons.forEach((polygon, faceIndex) => {
+            if (polygon.length < 3) return;
+            const center = polygon.reduce((sum, vertex) => sum.map((value, axis) => value + vertex[axis] / polygon.length), [0, 0, 0]);
+            const origin = center.map((value, axis) => value + lightDirection[axis] * 0.0001);
+            faceShadows[faceIndex] = hasOccluder(bvh, origin, lightDirection, mesh, faceIndex);
+        });
+    });
+    return shadowedFaces;
+}
+
+export function getDirectionalShadowBvhBuildCount(scene) {
+    return shadowGeometryCache.get(scene)?.buildCount || 0;
+}
+
+function getCachedShadowGeometry(scene) {
+    const signature = scene.meshes.map(mesh => [
+        mesh.geometryRevision,
+        mesh.geometrySignature,
+        ...mesh.position,
+        ...mesh.rotation,
+        ...mesh.scale,
+        mesh.getSkinningSignature?.() || ''
+    ].join(':')).join('|');
+    const cached = shadowGeometryCache.get(scene);
+    if (cached?.signature === signature) return cached;
 
     const worldPolygons = new Map();
     const triangles = [];
@@ -16,11 +52,8 @@ export function traceDirectionalShadowFaces(scene, light) {
             return transformPoint(model, local);
         }));
         worldPolygons.set(mesh, polygons);
-
         polygons.forEach((polygon, faceIndex) => {
             if (polygon.length < 3) return;
-            const color = mesh.faceColors[faceIndex] || mesh.material.color;
-            if ((color[3] ?? 1) <= 0.01) return;
             for (let vertexIndex = 1; vertexIndex < polygon.length - 1; vertexIndex++) {
                 const triangle = {
                     mesh,
@@ -37,21 +70,14 @@ export function traceDirectionalShadowFaces(scene, light) {
         });
     });
 
-    const bvh = buildBVH(triangles);
-    if (!bvh) return shadowedFaces;
-
-    scene.meshes.forEach(mesh => {
-        if (mesh.material.shading !== 'toon') return;
-        const polygons = worldPolygons.get(mesh);
-        const faceShadows = shadowedFaces.get(mesh);
-        polygons.forEach((polygon, faceIndex) => {
-            if (polygon.length < 3) return;
-            const center = polygon.reduce((sum, vertex) => sum.map((value, axis) => value + vertex[axis] / polygon.length), [0, 0, 0]);
-            const origin = center.map((value, axis) => value + lightDirection[axis] * 0.0001);
-            faceShadows[faceIndex] = hasOccluder(bvh, origin, lightDirection, mesh, faceIndex);
-        });
-    });
-    return shadowedFaces;
+    const next = {
+        signature,
+        worldPolygons,
+        bvh: buildBVH(triangles),
+        buildCount: (cached?.buildCount || 0) + 1
+    };
+    shadowGeometryCache.set(scene, next);
+    return next;
 }
 
 function buildBVH(triangles) {
@@ -80,6 +106,8 @@ function hasOccluder(node, origin, direction, sourceMesh, sourceFace) {
     if (node.triangles) {
         return node.triangles.some(triangle => {
             if (triangle.mesh === sourceMesh && triangle.faceIndex === sourceFace) return false;
+            const color = triangle.mesh.faceColors[triangle.faceIndex] || triangle.mesh.material.color;
+            if ((color[3] ?? 1) <= 0.01) return false;
             return rayIntersectsTriangle(origin, direction, triangle);
         });
     }

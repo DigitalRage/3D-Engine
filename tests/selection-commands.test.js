@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Material } from '../engine/material.js';
 import { Mesh } from '../engine/mesh.js';
-import { executeMeshCommand } from '../editor/ops/meshCommands.js';
+import { executeMeshCommand, executeSceneCommand } from '../editor/ops/meshCommands.js';
+import { listMeshOperators } from '../editor/ops/meshOperators.js';
 import { canonicalEdgeKey, SelectionModel } from '../editor/selection.js';
 
 test('selection model toggles meshes and active faces with modifiers', () => {
@@ -50,4 +51,28 @@ test('mesh edit command restores and replays one extrusion', () => {
     assert.equal(executeMeshCommand(editor, mesh, 'No-op', () => mesh.extrudeFace(-1)), false);
     assert.equal(editor.undoStack.length, 1);
     assert.equal(status.at(-1), 'No-op: no change');
+});
+
+test('scene mesh creation command undoes and redoes membership without snapshots', () => {
+    const editor = { undoStack: [], redoStack: [], maxHistoryLength: 100, ui: { setStatus() {} } };
+    const meshes = [];
+    const created = {};
+
+    assert.equal(executeSceneCommand(editor, 'Split', () => {
+        meshes.push(created);
+        return 1;
+    }, () => meshes.splice(meshes.indexOf(created), 1), () => meshes.push(created), count => count > 0), true);
+    assert.equal(editor.undoStack[0].type, 'scene-edit');
+    assert.equal(meshes.length, 1);
+    editor.undoStack[0].undo();
+    assert.equal(meshes.length, 0);
+    editor.undoStack[0].redo();
+    assert.equal(meshes[0], created);
+});
+
+test('operator registry exposes the requested mesh operation set', () => {
+    const names = new Set(listMeshOperators());
+    for (const name of ['extrude', 'inset', 'bevel', 'loopCut', 'bridge', 'fill', 'dissolve', 'split', 'separate', 'triangulate', 'recalculateNormals', 'flipNormals', 'mergeVertices', 'mergeCoplanar', 'knife']) {
+        assert.ok(names.has(name), `missing mesh operator: ${name}`);
+    }
 });

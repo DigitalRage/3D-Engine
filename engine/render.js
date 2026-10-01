@@ -97,6 +97,12 @@ export class Renderer {
         const gl = this.gl;
         if (!this.program) return;
 
+        scene.meshes.forEach(mesh => {
+            if (mesh.dirtyFlags.geometry || mesh.dirtyFlags.uvs) mesh.rebuildRenderData();
+            else if (mesh.dirtyFlags.materials || mesh.dirtyFlags.selection) mesh.updateRenderQueues();
+        });
+        scene.consumeDirtyFlags?.();
+
         gl.clearColor(0.1, 0.1, 0.15, 1.0);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         gl.enable(gl.DEPTH_TEST);
@@ -124,8 +130,11 @@ export class Renderer {
             gl.uniform1f(this.uniforms.uLightThreshold, light.threshold);
             gl.uniform3fv(this.uniforms.uShadeColor, new Float32Array(light.shadeColor));
         }
-        const shadowSignature = this.renderMode === 'anime' ? makeShadowSignature(scene) : null;
-        if (this.renderMode === 'anime' && shadowSignature !== this.shadowSignature) {
+        // Skip full raytraced shadows when scene is huge (keeps anime mode interactive for thousands of objects).
+        // Hard shadows still apply for smaller scenes; large scenes keep flat toon lighting only.
+        const meshCount = scene.meshes.length;
+        const shadowSignature = (this.renderMode === 'anime' && meshCount <= 800) ? makeShadowSignature(scene) : null;
+        if (this.renderMode === 'anime' && meshCount <= 800 && shadowSignature !== this.shadowSignature) {
             const tracedShadows = traceDirectionalShadowFaces(scene, light);
             scene.meshes.forEach(mesh => {
                 const next = tracedShadows.get(mesh) || Array(mesh.faceCount).fill(false);
@@ -136,7 +145,16 @@ export class Renderer {
                 }
             });
             this.shadowSignature = shadowSignature;
-        } else if (this.renderMode !== 'anime') {
+        } else if (this.renderMode !== 'anime' || meshCount > 800) {
+            if (meshCount > 800) {
+                // Clear per-face shadow flags so instance keys stay stable
+                scene.meshes.forEach(mesh => {
+                    if (mesh.shadowedFaces?.length) {
+                        mesh.shadowedFaces = Array(mesh.faceCount).fill(false);
+                        mesh.shadowVersion = (mesh.shadowVersion || 0) + 1;
+                    }
+                });
+            }
             this.shadowSignature = null;
         }
 
@@ -150,29 +168,48 @@ export class Renderer {
         const transparentFaces = [];
         const opaqueMeshes = [];
         const instanceGroups = new Map();
+        const frustum = extractFrustumPlanes(view, proj);
+        let culled = 0;
+        const useFrustumCull = scene.meshes.length > 50; // only when it matters
         scene.meshes.forEach(mesh => {
-            if (mesh.opaqueFaceIndices.length) {
+            if (useFrustumCull && mesh.boundsMin && mesh.boundsMax && !meshInFrustum(mesh, frustum)) {
+                culled++;
+                return;
+            }
+            if (mesh.opaqueFaceIndices && mesh.opaqueFaceIndices.length) {
                 const key = this.instancingExtension ? mesh.getInstanceBatchKey() : null;
                 if (key) {
                     if (!instanceGroups.has(key)) instanceGroups.set(key, []);
                     instanceGroups.get(key).push(mesh);
                 } else opaqueMeshes.push(mesh);
+            } else if (!mesh.transparentFaceIndices?.length) {
+                // Fallback: mesh may still need a full draw (e.g. before queues updated)
+                opaqueMeshes.push(mesh);
             }
-            if (!mesh.transparentFaceIndices.length) return;
+            if (!mesh.transparentFaceIndices || !mesh.transparentFaceIndices.length) return;
             const model = mesh.getModelMatrix();
             mesh.transparentFaceIndices.forEach(faceIndex => {
                 const polygon = mesh.polygons[faceIndex];
+                if (!polygon || !polygon.length) return;
                 const center = polygon.reduce((sum, vertex) => sum.map((value, axis) => value + vertex[axis] / polygon.length), [0, 0, 0]);
                 const worldCenter = transformPoint(model, center);
                 const distance = Math.hypot(...worldCenter.map((value, axis) => value - camera.position[axis]));
                 transparentFaces.push({ mesh, faceIndex, distance });
             });
         });
+        stats.culled = culled;
+        stats.objects = scene.meshes.length - culled;
 
         gl.depthMask(true);
+        const MAX_INSTANCES = 512;
         for (const meshes of instanceGroups.values()) {
-            if (meshes.length > 1) this.drawInstancedMeshes(meshes, frameId, stats);
-            else opaqueMeshes.push(meshes[0]);
+            if (meshes.length > 1) {
+                for (let i = 0; i < meshes.length; i += MAX_INSTANCES) {
+                    this.drawInstancedMeshes(meshes.slice(i, i + MAX_INSTANCES), frameId, stats);
+                }
+            } else {
+                opaqueMeshes.push(meshes[0]);
+            }
         }
         for (const mesh of opaqueMeshes) {
             mesh.draw(gl, this.program, mesh.opaqueFaceIndices, frameId, this.renderMode, stats);
@@ -214,13 +251,7 @@ export class Renderer {
         gl.uniform1f(this.uniforms.uInstanced, 1);
         gl.uniform1f(this.uniforms.uToonShading, this.renderMode === 'anime' && template.material.shading === 'toon' ? 1 : 0);
 
-        if (template.vertexWeights.size && template.skinningFrame !== frameId) {
-            gl.bindBuffer(gl.ARRAY_BUFFER, template.positionBuffer);
-            gl.bufferData(gl.ARRAY_BUFFER, template.getDeformedVertices(), gl.DYNAMIC_DRAW);
-            gl.bindBuffer(gl.ARRAY_BUFFER, template.normalBuffer);
-            gl.bufferData(gl.ARRAY_BUFFER, template.getDeformedNormals(), gl.DYNAMIC_DRAW);
-            template.skinningFrame = frameId;
-        }
+        if (template.vertexWeights.size || template.skinningSignature) template.updateSkinningBuffers(gl);
         const uniforms = template.getUniformLocations(gl, this.program);
         template.getDrawBatches(template.opaqueFaceIndices).forEach(batch => {
             gl.uniform4fv(uniforms.uColor, batch.color);
@@ -315,10 +346,13 @@ function makeShadowSignature(scene) {
         hash = Math.imul(hash ^ Math.round((Number(value) || 0) * 1e5), 16777619);
     };
     add(scene.meshes.length);
+    add(scene.geometryRevision);
     scene.light?.direction.forEach(add);
     scene.meshes.forEach(mesh => {
-        add(mesh.renderStateVersion);
+        add(mesh.geometryRevision);
+        for (const character of mesh.geometrySignature) add(character.charCodeAt(0));
         add(mesh.material.shading === 'toon' ? 1 : 0);
+        mesh.faceColors.forEach(color => add(color[3] ?? 1));
         mesh.position.forEach(add);
         mesh.rotation.forEach(add);
         mesh.scale.forEach(add);
@@ -332,4 +366,56 @@ function makeShadowSignature(scene) {
         });
     });
     return hash >>> 0;
+}
+
+/** Extract 6 frustum planes from combined view-projection (column-major). */
+function extractFrustumPlanes(view, proj) {
+    // clip = proj * view (column-major multiply)
+    const clip = new Float32Array(16);
+    for (let c = 0; c < 4; c++) {
+        for (let r = 0; r < 4; r++) {
+            clip[c * 4 + r] =
+                proj[0 * 4 + r] * view[c * 4 + 0] +
+                proj[1 * 4 + r] * view[c * 4 + 1] +
+                proj[2 * 4 + r] * view[c * 4 + 2] +
+                proj[3 * 4 + r] * view[c * 4 + 3];
+        }
+    }
+    const planes = [];
+    // left, right, bottom, top, near, far
+    const coeffs = [
+        [clip[3] + clip[0], clip[7] + clip[4], clip[11] + clip[8], clip[15] + clip[12]],
+        [clip[3] - clip[0], clip[7] - clip[4], clip[11] - clip[8], clip[15] - clip[12]],
+        [clip[3] + clip[1], clip[7] + clip[5], clip[11] + clip[9], clip[15] + clip[13]],
+        [clip[3] - clip[1], clip[7] - clip[5], clip[11] - clip[9], clip[15] - clip[13]],
+        [clip[3] + clip[2], clip[7] + clip[6], clip[11] + clip[10], clip[15] + clip[14]],
+        [clip[3] - clip[2], clip[7] - clip[6], clip[11] - clip[10], clip[15] - clip[14]]
+    ];
+    for (const p of coeffs) {
+        const len = Math.hypot(p[0], p[1], p[2]) || 1;
+        planes.push([p[0] / len, p[1] / len, p[2] / len, p[3] / len]);
+    }
+    return planes;
+}
+
+function meshInFrustum(mesh, planes) {
+    const min = mesh.boundsMin;
+    const max = mesh.boundsMax;
+    if (!min || !max) return true;
+    const pos = mesh.position;
+    const sc = mesh.scale || [1, 1, 1];
+    // Conservative world-space radius (handles non-uniform scale)
+    const hx = Math.max(Math.abs(min[0]), Math.abs(max[0])) * Math.abs(sc[0]);
+    const hy = Math.max(Math.abs(min[1]), Math.abs(max[1])) * Math.abs(sc[1]);
+    const hz = Math.max(Math.abs(min[2]), Math.abs(max[2])) * Math.abs(sc[2]);
+    const radius = Math.hypot(hx, hy, hz) * 1.05; // small pad against edge cases
+    const cx = pos[0];
+    const cy = pos[1];
+    const cz = pos[2];
+    for (let i = 0; i < planes.length; i++) {
+        const plane = planes[i];
+        const dist = plane[0] * cx + plane[1] * cy + plane[2] * cz + plane[3];
+        if (dist < -radius) return false;
+    }
+    return true;
 }

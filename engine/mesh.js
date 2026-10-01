@@ -5,6 +5,10 @@ import { textureHasTransparency } from './loader.js';
 
 export class Mesh {
     constructor(material) {
+        this.dirtyFlags = { geometry: true, uvs: true, materials: true, skeletonPose: true, selection: true };
+        this.geometryRevision = 0;
+        this.transformRevision = 0;
+        this.skinRevision = 0;
         this.material = material;
         this.name = 'Mesh';
         this.position = [0, 0, 0];
@@ -36,7 +40,6 @@ export class Mesh {
         this.selectedVertex = null;
         this.selectedBone = null;
         this.vertexWeights = new Map();
-        this.skinRevision = 0;
         this.shadowedFaces = [];
         this.shadowVersion = 0;
         this.uniformLocations = null;
@@ -64,6 +67,76 @@ export class Mesh {
         this._setPolygonViews([]);
     }
 
+    get positions() { return this._positions; }
+    set positions(value) {
+        this._positions = observeArrays(value, () => this.markDirty('geometry'));
+        this.markDirty('geometry');
+    }
+
+    get faces() { return this._faces; }
+    set faces(value) {
+        this._faces = observeArrays(value, () => this.markDirty('geometry'));
+        this.markDirty('geometry');
+    }
+
+    get faceUvs() { return this._faceUvs; }
+    set faceUvs(value) {
+        this._faceUvs = observeArrays(value, () => this.markDirty('uvs'));
+        this.markDirty('uvs');
+    }
+
+    get faceColors() { return this._faceColors; }
+    set faceColors(value) {
+        this._faceColors = observeArrays(value, () => this.markDirty('materials'));
+        this.markDirty('materials');
+    }
+
+    get faceTextures() { return this._faceTextures; }
+    set faceTextures(value) {
+        this._faceTextures = observeArray(value, () => this.markDirty('materials'));
+        this.markDirty('materials');
+    }
+
+    get faceTextureIds() { return this._faceTextureIds; }
+    set faceTextureIds(value) {
+        this._faceTextureIds = observeArray(value, () => this.markDirty('materials'));
+        this.markDirty('materials');
+    }
+
+    get faceUvTransforms() { return this._faceUvTransforms; }
+    set faceUvTransforms(value) {
+        this._faceUvTransforms = observeArrays(value, () => this.markDirty('materials'));
+        this.markDirty('materials');
+    }
+
+    get selectedFace() { return this._selectedFace; }
+    set selectedFace(value) {
+        if (this._selectedFace === value) return;
+        this._selectedFace = value;
+        this.markDirty('selection');
+    }
+
+    get selectedVertex() { return this._selectedVertex; }
+    set selectedVertex(value) {
+        this._selectedVertex = value;
+        this.markDirty('selection');
+    }
+
+    markDirty(...flags) {
+        for (const flag of flags) {
+            if (!(flag in this.dirtyFlags)) continue;
+            this.dirtyFlags[flag] = true;
+            if (flag === 'geometry') this.geometryRevision++;
+            if (flag === 'skeletonPose') this.skinRevision++;
+        }
+    }
+
+    consumeDirtyFlags() {
+        const dirty = { ...this.dirtyFlags };
+        Object.keys(this.dirtyFlags).forEach(flag => { this.dirtyFlags[flag] = false; });
+        return dirty;
+    }
+
     get polygons() {
         return this._polygonProxy;
     }
@@ -71,16 +144,19 @@ export class Mesh {
     set polygons(value) {
         this._setPolygonViews(Array.isArray(value) ? value : []);
         this._legacyViewExposed = true;
+        this.markDirty('geometry');
     }
 
     _setPolygonViews(polygons) {
         const wrapFace = face => new Proxy(face, {
             set: (target, property, value, receiver) => {
                 this._legacyViewExposed = true;
+                this.markDirty('geometry');
                 return Reflect.set(target, property, value, receiver);
             },
             deleteProperty: (target, property) => {
                 this._legacyViewExposed = true;
+                this.markDirty('geometry');
                 return Reflect.deleteProperty(target, property);
             }
         });
@@ -88,10 +164,12 @@ export class Mesh {
         this._polygonProxy = new Proxy(this._polygonViews, {
             set: (target, property, value, receiver) => {
                 this._legacyViewExposed = true;
+                this.markDirty('geometry');
                 return Reflect.set(target, property, Array.isArray(value) ? wrapFace(value) : value, receiver);
             },
             deleteProperty: (target, property) => {
                 this._legacyViewExposed = true;
+                this.markDirty('geometry');
                 return Reflect.deleteProperty(target, property);
             }
         });
@@ -708,6 +786,8 @@ export class Mesh {
         this.opaqueFaceIndices = [];
         this.transparentFaceIndices = [];
         this.renderStateVersion++;
+        this.dirtyFlags.materials = false;
+        this.dirtyFlags.selection = false;
         for (let faceIndex = 0; faceIndex < this.faceCount; faceIndex++) {
             const color = this.faceColors[faceIndex] || [1, 1, 1, 1];
             const texture = this.faceTextures[faceIndex] || (this.material.useTexture ? this.material.texture : null);
@@ -754,7 +834,7 @@ export class Mesh {
         const total = [...skin.weights.values()].reduce((sum, value) => sum + value, 0);
         if (total > 1) skin.weights.forEach((value, weightedBone) => skin.weights.set(weightedBone, value / total));
         if (!skin.weights.size) this.vertexWeights.delete(sharedVertexIndex);
-        this.skinRevision++;
+        this.markDirty('skeletonPose');
         return true;
     }
 
@@ -784,7 +864,7 @@ export class Mesh {
             skin.weights.set(bone, Math.max(skin.weights.get(bone) || 0, influence * Math.max(0, 1 - otherTotal)));
             assigned++;
         });
-        if (assigned) this.skinRevision++;
+        if (assigned) this.markDirty('skeletonPose');
         return assigned;
     }
 
@@ -792,7 +872,7 @@ export class Mesh {
         const sharedVertexIndex = this.faces[faceIndex]?.[vertexIndex];
         if (sharedVertexIndex === undefined) return false;
         const cleared = this.vertexWeights.delete(sharedVertexIndex);
-        if (cleared) this.skinRevision++;
+        if (cleared) this.markDirty('skeletonPose');
         return cleared;
     }
 
@@ -804,7 +884,7 @@ export class Mesh {
             removed.forEach(removedBone => skin.weights.delete(removedBone));
             if (!skin.weights.size) this.vertexWeights.delete(vertexIndex);
         });
-        this.skinRevision++;
+        this.markDirty('skeletonPose');
         this.selectedBone = this.skeleton.bones.length ? Math.min(index, this.skeleton.bones.length - 1) : null;
         return true;
     }
@@ -842,6 +922,32 @@ export class Mesh {
         return new Float32Array(normals);
     }
 
+    getSkinningSignature() {
+        if (!this.vertexWeights.size) return '';
+        const pose = this.skeleton.bones.map(bone => [
+            bone.name,
+            ...bone.position,
+            ...bone.rotation,
+            ...bone.scale
+        ]);
+        return `${this.geometryRevision}:${this.skinRevision}:${JSON.stringify(pose)}`;
+    }
+
+    updateSkinningBuffers(gl) {
+        const signature = this.getSkinningSignature();
+        if (signature === this.skinningSignature) {
+            this.dirtyFlags.skeletonPose = false;
+            return false;
+        }
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, signature ? this.getDeformedVertices() : this.vertices, gl.DYNAMIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.normalBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, signature ? this.getDeformedNormals() : this.normals, gl.DYNAMIC_DRAW);
+        this.skinningSignature = signature;
+        this.dirtyFlags.skeletonPose = false;
+        return true;
+    }
+
     getVertexWeightData() {
         return this.faces.map(face => face.map(vertexIndex => {
             const vertex = this.positions[vertexIndex];
@@ -856,12 +962,17 @@ export class Mesh {
 
     setFaceVertex(faceIndex, vertexIndex, position) {
         const sharedVertexIndex = this.faces[faceIndex]?.[vertexIndex];
+        return this.setVertexPosition(sharedVertexIndex, position);
+    }
+
+    setVertexPosition(sharedVertexIndex, position) {
         const vertex = this.positions[sharedVertexIndex];
         if (!vertex) return;
         vertex.splice(0, 3, ...position);
         const skin = this.vertexWeights.get(sharedVertexIndex);
         if (skin) skin.bindPosition = [...position];
         this.rebuildRenderData();
+        return true;
     }
 
     weldNearbyVertices(faceIndex, vertexIndex, threshold = 0.08) {
@@ -1003,6 +1114,7 @@ export class Mesh {
     }
 
     rebuildRenderData() {
+        if (!this._legacyViewExposed && !this.dirtyFlags.geometry && !this.dirtyFlags.uvs) return false;
         if (this._legacyViewExposed) this._syncTopologyFromPolygonViews();
 
         const vertices = [];
@@ -1062,6 +1174,10 @@ export class Mesh {
         this._refreshPolygonViews();
         this.updateRenderQueues();
         if (this.vao) this.invalidateBuffers();
+        this.dirtyFlags.geometry = false;
+        this.dirtyFlags.uvs = false;
+        this.renderDataRevision = (this.renderDataRevision || 0) + 1;
+        return true;
     }
 
     invalidateBuffers() {
@@ -1135,7 +1251,15 @@ export class Mesh {
     }
 
     getModelMatrix() {
-        const out = new Float32Array(16);
+        // Cache matrix; only recompute when transform changes.
+        if (!this._modelMatrixCache) this._modelMatrixCache = new Float32Array(16);
+        if (this._modelMatrixCacheRevision === this.transformRevision && this._cachedPos &&
+            this._cachedPos[0] === this.position[0] && this._cachedPos[1] === this.position[1] && this._cachedPos[2] === this.position[2] &&
+            this._cachedRot && this._cachedRot[0] === this.rotation[0] && this._cachedRot[1] === this.rotation[1] && this._cachedRot[2] === this.rotation[2] &&
+            this._cachedScale && this._cachedScale[0] === this.scale[0] && this._cachedScale[1] === this.scale[1] && this._cachedScale[2] === this.scale[2]) {
+            return this._modelMatrixCache;
+        }
+        const out = this._modelMatrixCache;
         const [x, y, z] = this.rotation;
         const [sx, sy, sz] = this.scale;
         const cx = Math.cos(x), sxr = Math.sin(x);
@@ -1154,7 +1278,16 @@ export class Mesh {
         out[4] = r01 * sy; out[5] = r11 * sy; out[6] = r21 * sy; out[7] = 0;
         out[8] = r02 * sz; out[9] = r12 * sz; out[10] = r22 * sz; out[11] = 0;
         out[12] = this.position[0]; out[13] = this.position[1]; out[14] = this.position[2]; out[15] = 1;
+        this._modelMatrixCacheRevision = this.transformRevision || 0;
+        this._cachedPos = [...this.position];
+        this._cachedRot = [...this.rotation];
+        this._cachedScale = [...this.scale];
         return out;
+    }
+
+    invalidateTransformCache() {
+        this.transformRevision = (this.transformRevision || 0) + 1;
+        this._modelMatrixCacheRevision = -1;
     }
 
     draw(gl, program, faceIndices = null, frameToken = undefined, renderMode = 'anime', stats = null) {
@@ -1170,15 +1303,8 @@ export class Mesh {
         gl.uniformMatrix4fv(uniforms.uModel, false, this.getModelMatrix());
         gl.uniform1f(uniforms.uInstanced, 0);
         gl.uniform1f(uniforms.uToonShading, renderMode === 'anime' && this.material.shading === 'toon' ? 1 : 0);
-        if (this.vertexWeights.size) {
-            if (frameToken === undefined || this.skinningFrame !== frameToken) {
-                gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, this.getDeformedVertices(), gl.DYNAMIC_DRAW);
-                gl.bindBuffer(gl.ARRAY_BUFFER, this.normalBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, this.getDeformedNormals(), gl.DYNAMIC_DRAW);
-                this.skinningFrame = frameToken;
-            }
-        }
+        if (this.vertexWeights.size || this.skinningSignature) this.updateSkinningBuffers(gl);
+        else this.dirtyFlags.skeletonPose = false;
         if (renderMode === 'wireframe') {
             const color = this.material.color;
             gl.uniform4fv(uniforms.uColor, new Float32Array([color[0], color[1], color[2], color[3] ?? 1]));
@@ -1316,6 +1442,39 @@ export class Mesh {
 }
 
 const DEFAULT_UV_CENTER = [0.5, 0.5];
+
+function observeArrays(value, onChange) {
+    return Array.isArray(value) ? observeArray(value, onChange) : value;
+}
+
+function observeArray(value, onChange) {
+    const wrap = entry => {
+        if (Array.isArray(entry)) return observeArray(entry, onChange);
+        if (!entry || Object.getPrototypeOf(entry) !== Object.prototype) return entry;
+        const object = Object.fromEntries(Object.entries(entry).map(([key, child]) => [key, wrap(child)]));
+        return new Proxy(object, {
+            set(target, property, next, receiver) {
+                onChange();
+                return Reflect.set(target, property, wrap(next), receiver);
+            },
+            deleteProperty(target, property) {
+                onChange();
+                return Reflect.deleteProperty(target, property);
+            }
+        });
+    };
+    const target = value.map(wrap);
+    return new Proxy(target, {
+        set(array, property, next, receiver) {
+            onChange();
+            return Reflect.set(array, property, wrap(next), receiver);
+        },
+        deleteProperty(array, property) {
+            onChange();
+            return Reflect.deleteProperty(array, property);
+        }
+    });
+}
 
 function projectToPlane(point, center, normal) {
     const vector = point.map((value, axis) => value - center[axis]);

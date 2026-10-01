@@ -4,6 +4,7 @@ import { createAssetsPanel } from './panels/assets.js';
 import { createBonesPanel } from './panels/bones.js';
 import { createLightingPanel } from './panels/lighting.js';
 import { DirectionalLight } from '../engine/light.js';
+import { dispatchEditorShortcut } from './shortcuts.js';
 
 export function createUI(root, options) {
     const { scene, onSelect, onSelectFace, onSetPickMode, onAddCube, onAddPlane, onAddSphere, onAddCylinder, onAddBatch, onDuplicate, onAddFace, onExtrudeFace, onMergeFace, onMergeVertices, onAddVertex, onAddBone, onRemoveBone, onCreateAnimation, onKeyPose, onDeleteBoneKeys, onSeekAnimation, onToggleAnimation, onRenameAnimation, onSetAnimationDuration, onImportMesh, onImportTexture, onDelete, onReorderMesh, onResetCamera, onExport, onUndo, onRedo, onHistory = () => {}, onKnifeTool, onBevel, onInset, onLoopCut, onBridge, onFill, onGridFill, onDissolve, onSplit, onSeparate, onTriangulate, onQuadRebuild, onRecalculateNormals, onFlipNormals } = options;
@@ -140,24 +141,32 @@ export function createUI(root, options) {
     operatorStatus.className = 'operator-status';
     operatorStatus.textContent = 'Ready';
     root.appendChild(operatorStatus);
+    const editorStatus = { tool: 'select', mode: 'face', space: 'world', snap: {}, last: 'Ready' };
+    const labels = { select: 'Select', move: 'Move', rotate: 'Rotate', scale: 'Scale', mesh: 'Object', orbit: 'Orbit', face: 'Face', edge: 'Edge', vertex: 'Vertex' };
+    const refreshStatus = () => {
+        const counts = options.getSelectionCounts?.() || {};
+        const snapOn = Object.entries(editorStatus.snap).some(([key, value]) => key.endsWith('Step') ? false : !!value);
+        operatorStatus.textContent = `${labels[editorStatus.tool] || editorStatus.tool} | ${labels[editorStatus.mode] || editorStatus.mode} | ${String(editorStatus.space).toUpperCase()} | Snap ${snapOn ? 'On' : 'Off'} | M ${counts.meshes || 0} F ${counts.faces || 0} E ${counts.edges || 0} V ${counts.vertices || 0} | ${editorStatus.last}`;
+    };
     window.addEventListener('keydown', event => {
-        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
-            event.preventDefault();
-            if (event.shiftKey) onRedo();
-            else onUndo();
-            return;
-        }
-        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
-            event.preventDefault();
-            onRedo();
-            return;
-        }
+        const handled = dispatchEditorShortcut(event, {
+            onUndo,
+            onRedo,
+            onDuplicate,
+            onDelete,
+            onExtrude: onExtrudeFace,
+            onSetPickMode: mode => setPickMode(mode),
+            onSetTransformTool: mode => setTransformTool(mode),
+            onSetCameraView: view => setCameraView(view),
+            confirmDelete: () => window.confirm('Delete the selected mesh or meshes?')
+        }, { isTextEntry: isTextEntry(document.activeElement) });
+        if (handled) return;
         if ((event.key === 'Backspace' || event.key === 'Delete') && !isTextEntry(document.activeElement)) {
             event.preventDefault();
             onDelete();
             return;
         }
-        if (event.key.toLowerCase() !== 'f' || ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+        if (event.key.toLowerCase() !== 'f' || isTextEntry(document.activeElement)) return;
         root.style.display = root.style.display === 'none' ? '' : 'none';
     });
 
@@ -302,6 +311,8 @@ export function createUI(root, options) {
     const setTransformTool = mode => {
         transformButtons.forEach((element, key) => element.classList.toggle('selected', key === mode));
         options.onSetTransformTool?.(mode);
+        editorStatus.tool = mode;
+        refreshStatus();
     };
     [['Select', 'select'], ['Move', 'move'], ['Rotate', 'rotate'], ['Scale', 'scale']].forEach(([label, mode]) => {
         transformButtons.set(mode, button(label, () => setTransformTool(mode)));
@@ -316,7 +327,11 @@ export function createUI(root, options) {
         option.textContent = label;
         transformSpace.appendChild(option);
     });
-    transformSpace.addEventListener('change', () => options.onSetTransformSpace?.(transformSpace.value));
+    transformSpace.addEventListener('change', () => {
+        options.onSetTransformSpace?.(transformSpace.value);
+        editorStatus.space = transformSpace.value;
+        refreshStatus();
+    });
     activeToolGroup.appendChild(transformSpace);
 
     let selectedAxis = null;
@@ -353,6 +368,8 @@ export function createUI(root, options) {
             amount.value = String(snapSettings[stepKey]);
             amount.disabled = !checkbox.checked;
             options.onSetSnap?.({ ...snapSettings });
+            editorStatus.snap = { ...snapSettings };
+            refreshStatus();
         };
         checkbox.addEventListener('change', update);
         amount.addEventListener('change', update);
@@ -369,6 +386,10 @@ export function createUI(root, options) {
             options.onSetCameraView?.(view);
         }));
     });
+    const setCameraView = view => {
+        cameraButtons.forEach((element, key) => element.classList.toggle('selected', key === view));
+        options.onSetCameraView?.(view);
+    };
     cameraButtons.get('perspective').classList.add('selected');
 
     group('Display');
@@ -795,20 +816,24 @@ export function createUI(root, options) {
     });
 
     const modeLabels = new Map([['vertex', 'Vertex'], ['edge', 'Edge'], ['face', 'Face'], ['mesh', 'Object'], ['orbit', 'Orbit']]);
+    const pickModeButtons = new Map();
+    const setPickMode = mode => {
+        onSetPickMode(mode);
+        setTransformTool('select');
+        editorStatus.mode = mode;
+        container.classList.remove('uv-mode');
+        uvModeButton.classList.remove('selected');
+        pickModeButtons.forEach((element, key) => element.classList.toggle('selected', key === mode));
+        refreshStatus();
+    };
     ['vertex', 'edge', 'face', 'mesh', 'orbit'].forEach(mode => {
         const modeButton = document.createElement('button');
         modeButton.className = 'editor-button' + (mode === 'face' ? ' selected' : '');
         modeButton.type = 'button';
         modeButton.textContent = modeLabels.get(mode);
         modeButton.dataset.pickMode = mode;
-        modeButton.addEventListener('click', () => {
-            onSetPickMode(mode);
-            options.onSetTransformTool?.('select');
-            transformButtons.forEach((element, key) => element.classList.toggle('selected', key === 'select'));
-            container.classList.remove('uv-mode');
-            uvModeButton.classList.remove('selected');
-            toolbar.querySelectorAll('[data-pick-mode]').forEach(button => button.classList.toggle('selected', button.dataset.pickMode === mode));
-        });
+        modeButton.addEventListener('click', () => setPickMode(mode));
+        pickModeButtons.set(mode, modeButton);
         modeButtons.appendChild(modeButton);
     });
     const uvModeButton = document.createElement('button');
@@ -839,7 +864,7 @@ export function createUI(root, options) {
     });
     const inspector = createInspectorPanel(options.gl, options.textureLibrary, onSelectFace, onHistory);
     const assets = createAssetsPanel(options.textureLibrary, onImportMesh, onImportTexture, options.prefabActions);
-    const bones = createBonesPanel({ onAddBone, onRemoveBone, onCreateAnimation, onKeyPose, onDeleteBoneKeys, onSeekAnimation, onToggleAnimation, onRenameAnimation, onSetAnimationDuration, onHistory });
+    const bones = createBonesPanel({ onAddBone, onRemoveBone, onCreateAnimation, onKeyPose, onDeleteBoneKeys, onSeekAnimation, onToggleAnimation, onRenameAnimation, onSetAnimationDuration, onHistory, onChange: options.onBonePoseChange });
     if (!scene.light) scene.light = new DirectionalLight();
     const lighting = createLightingPanel(scene.light, onHistory);
 
@@ -1020,6 +1045,9 @@ export function createUI(root, options) {
         refreshBones: bones.refresh,
         setInternalFps: (fps, frameMs) => { fpsReadout.textContent = `Internal FPS ${Math.round(fps)} | ${frameMs.toFixed(2)} ms`; },
         setPolygonCount: (current, total) => { polygonReadout.textContent = `Current Mesh Polygons / All Polygons: ${current} / ${total}`; },
+        setStatus: message => { editorStatus.last = message; refreshStatus(); },
+        setEditorState: state => { Object.assign(editorStatus, state); refreshStatus(); },
+        refreshStatus,
         setViewportStats: stats => {
             if (!stats) return;
             viewportStats.textContent = `Draw calls ${stats.drawCalls} | Triangles ${stats.triangles} | Objects ${stats.objects}`;
@@ -1033,10 +1061,7 @@ export function createUI(root, options) {
         updateUvWorkspace: drawUvWorkspace,
         updateAnimationWorkspace: (time, playing) => bones.updatePlayback(time, playing),
         setPickMode: mode => {
-            onSetPickMode(mode);
-            container.classList.remove('uv-mode');
-            uvModeButton.classList.remove('selected');
-            toolbar.querySelectorAll('[data-pick-mode]').forEach(button => button.classList.toggle('selected', button.dataset.pickMode === mode));
+            setPickMode(mode);
         }
     };
 

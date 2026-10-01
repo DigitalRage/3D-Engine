@@ -82,6 +82,7 @@ export class AnimationClip {
             const from = track.values[previous];
             const to = track.values[next];
             trackTarget[track.property] = from.map((value, index) => value + (to[index] - value) * amount);
+            if (track.boneName) target.markDirty?.('skeletonPose');
         });
     }
 }
