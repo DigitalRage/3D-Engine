@@ -55,3 +55,11 @@ test('scene audio config merges safely with defaults', () => {
     assert.equal(config.actions.length, 1);
     assert.deepEqual(Object.keys(createDefaultAudioSceneConfig().buses), ['music', 'sfx', 'ui', 'voice']);
 });
+
+test('the packaged song id is stable and playable by manifest path', () => {
+    const manifest = normalizeAudioManifest({ version: 1, assets: [
+        { path: 'Hic Svnt Leones Loop.ogg', name: 'Hic Svnt Leones Loop' }
+    ] });
+    assert.equal(manifest.assets[0].id, 'hic-svnt-leones-loop');
+    assert.equal(manifest.assets[0].path, 'Hic Svnt Leones Loop.ogg');
+});

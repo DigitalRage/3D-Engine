@@ -1,4 +1,13 @@
 {
   "version": 1,
-  "assets": []
+  "assets": [
+    {
+      "id": "hic-svnt-leones-loop",
+      "name": "Hic Svnt Leones Loop",
+      "path": "Hic Svnt Leones Loop.ogg",
+      "loopable": true,
+      "tags": [],
+      "volume": 1
+    }
+  ]
 }

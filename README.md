@@ -30,7 +30,7 @@ A lightweight, browser-based 3D editor and game engine focused on **anime / toon
 - `AudioManager` uses browser Web Audio with lazy initialization for autoplay-policy compatibility.
 - Four buses (`music`, `sfx`, `ui`, `voice`) plus a master bus, each with volume/mute controls and a safety compressor.
 - Playback handles support pause, resume, seek, loop, playback rate, fade, and optional 3D positioning.
-- `assets/sound/index.json` is the OGG manifest; `tools/build-sound-manifest.mjs` scans `assets/sound/*.ogg`.
+- `assets/sound/index.json` is the OGG manifest; `tools/build-sound-manifest.mjs` scans `assets/sound/*.ogg`. The packaged manifest is also embedded in `index.html` so the library works when the editor is opened directly from `file://`.
 - Scene audio configuration is exported into scene JSON, including background music and action cues.
 
 ### Game Engine / Runtime
@@ -74,7 +74,7 @@ Place `.ogg` files in `assets/sound/`, then rebuild the manifest:
 node tools/build-sound-manifest.mjs
 ```
 
-Open the **Audio** panel to preview sounds, choose background music, set mixer levels, and author action cues. Action cues can be triggered by runtime scripts, for example:
+Open the **Audio** panel to preview sounds, choose background music, set mixer levels, and author action cues. The panel also has **Choose OGG Files** for loading local OGG files directly into the current session. Action cues can be triggered by runtime scripts, for example:
 
 ```js
 rt.triggerAudioAction('player.jump', { position: [x, y, z] });

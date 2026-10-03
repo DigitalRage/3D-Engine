@@ -30,6 +30,26 @@ export function createAudioPanel(scene, audioManager, onHistory = () => {}) {
     });
     panel.appendChild(enableButton);
 
+    const chooseInput = document.createElement('input');
+    chooseInput.type = 'file';
+    chooseInput.accept = '.ogg,audio/ogg';
+    chooseInput.multiple = true;
+    chooseInput.hidden = true;
+    const chooseButton = document.createElement('button');
+    chooseButton.className = 'editor-button';
+    chooseButton.type = 'button';
+    chooseButton.textContent = 'Choose OGG Files';
+    chooseButton.addEventListener('click', () => chooseInput.click());
+    chooseInput.addEventListener('change', () => {
+        const added = audioManager?.addLocalFiles?.(chooseInput.files) || [];
+        status.textContent = added.length
+            ? `Loaded ${added.length} local OGG${added.length === 1 ? '' : 's'} for this session.`
+            : 'No OGG files were added.';
+        chooseInput.value = '';
+        refresh();
+    });
+    panel.append(chooseButton, chooseInput);
+
     const reloadButton = document.createElement('button');
     reloadButton.className = 'editor-button';
     reloadButton.type = 'button';
@@ -63,8 +83,12 @@ export function createAudioPanel(scene, audioManager, onHistory = () => {}) {
     playPreview.textContent = 'Play';
     playPreview.addEventListener('click', () => {
         if (!previewSelect.value) return;
-        audioManager?.preview(previewSelect.value, { loop: previewLoop.checked });
-        status.textContent = `Previewing ${previewSelect.selectedOptions[0]?.textContent || previewSelect.value}.`;
+        audioManager?.unlock?.();
+        const playback = audioManager?.preview(previewSelect.value, { loop: previewLoop.checked });
+        playback?.onFinished?.(result => {
+            if (result.state === 'error') status.textContent = 'OGG playback failed. Check the browser console for the media error.';
+        });
+        status.textContent = `Playing ${previewSelect.selectedOptions[0]?.textContent || previewSelect.value}.`;
     });
     const stopPreview = document.createElement('button');
     stopPreview.className = 'editor-button';
@@ -120,6 +144,7 @@ export function createAudioPanel(scene, audioManager, onHistory = () => {}) {
     musicPlayNow.textContent = 'Play Now';
     musicPlayNow.addEventListener('click', () => {
         if (!musicSelect.value) return;
+        audioManager?.unlock?.();
         audioManager?.playMusic?.(musicSelect.value, {
             loop: musicLoop.input.checked,
             volume: Number(musicVolume.input.value),

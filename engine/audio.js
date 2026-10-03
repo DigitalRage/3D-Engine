@@ -138,6 +138,7 @@ export class AudioManager {
         this.listener = null;
         this._audioUnlocked = false;
         this._unlockInstalled = false;
+        this._localObjectUrls = new Map();
         this._playbackId = 0;
         this.onError = null;
         this.ready = this.loadManifest();
@@ -150,12 +151,25 @@ export class AudioManager {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const manifest = normalizeAudioManifest(await response.json());
             this.setManifest(manifest);
+            return this.manifest;
         } catch (error) {
+            // file:// pages cannot reliably fetch JSON in modern browsers.
+            // The packaged engine embeds a copy of the manifest for that case.
+            try {
+                const embedded = document.getElementById('embedded-sound-manifest');
+                if (embedded?.textContent?.trim()) {
+                    const manifest = normalizeAudioManifest(JSON.parse(embedded.textContent));
+                    this.setManifest(manifest);
+                    return this.manifest;
+                }
+            } catch (embeddedError) {
+                this.onError?.(embeddedError);
+            }
             this.setManifest({ version: AUDIO_MANIFEST_VERSION, assets: [] });
             this.onError?.(error);
             console.warn('Audio manifest unavailable; the engine will still run.', error);
+            return this.manifest;
         }
-        return this.manifest;
     }
 
     setManifest(manifest) {
@@ -173,6 +187,23 @@ export class AudioManager {
 
     listSounds() {
         return [...this.assets.values()];
+    }
+
+    addLocalFiles(files = []) {
+        const added = [];
+        for (const file of Array.from(files || [])) {
+            if (!(file instanceof File) || !/\.ogg$/i.test(file.name)) continue;
+            const base = slugify(file.name.replace(/\.ogg$/i, '')) || 'sound';
+            let id = base;
+            let suffix = 2;
+            while (this.assets.has(id)) id = `${base}-${suffix++}`;
+            const url = URL.createObjectURL(file);
+            this._localObjectUrls.set(id, url);
+            const asset = { id, name: file.name.replace(/\.ogg$/i, ''), path: url, loopable: true, tags: ['local'], volume: 1, local: true };
+            this.assets.set(id, asset);
+            added.push(asset);
+        }
+        return added;
     }
 
     getSound(id) {
@@ -298,8 +329,21 @@ export class AudioManager {
         const context = this.ensureContext();
         const audio = new Audio();
         audio.preload = 'auto';
-        audio.crossOrigin = 'anonymous';
-        audio.src = this.resolveUrl(asset);
+        const mediaUrl = this.resolveUrl(asset);
+        // Do not force CORS mode for local files or same-origin media. Setting
+        // crossOrigin on file:// media can turn a perfectly playable OGG into
+        // a silent media element in Chromium.
+        try {
+            const parsed = new URL(mediaUrl, document.baseURI);
+            const page = new URL(document.baseURI);
+            if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+                (page.protocol === 'http:' || page.protocol === 'https:') &&
+                parsed.origin !== page.origin) {
+                audio.crossOrigin = 'anonymous';
+            }
+        } catch {}
+        audio.src = mediaUrl;
+        audio.load();
         audio.loop = !!options.loop;
         audio.playbackRate = clampNumber(options.playbackRate ?? 1, 0.25, 4);
         audio.volume = 1;
@@ -617,6 +661,10 @@ export class AudioManager {
         this.queues.clear();
         this.actionCues.clear();
         this.buses.clear();
+        for (const url of this._localObjectUrls.values()) {
+            try { URL.revokeObjectURL(url); } catch {}
+        }
+        this._localObjectUrls.clear();
         try { this.context?.close(); } catch {}
         this.context = null;
         this.masterGain = null;
@@ -641,13 +689,27 @@ export class AudioPlayback {
 
     start(delay = 0) {
         const begin = () => {
-            if (this.state !== 'ready' && this.state !== 'paused') return;
+            if (this.state !== 'ready' && this.state !== 'paused' && this.state !== 'blocked') return;
             this.state = 'playing';
             this._started = true;
+            // Resume Web Audio when possible, but never wait for it before
+            // asking the media element to play. This preserves user-gesture
+            // activation while still recovering from a suspended context.
+            this.manager.unlock();
             const promise = this.audio.play();
             if (promise?.catch) promise.catch(error => {
                 this.manager.onError?.(error);
                 this.state = 'blocked';
+                if (error?.name === 'NotAllowedError') {
+                    this.manager.unlock().then(unlocked => {
+                        if (!unlocked || this.state !== 'blocked') return;
+                        this.state = 'playing';
+                        this.audio.play().catch(retryError => {
+                            this.manager.onError?.(retryError);
+                            this.state = 'blocked';
+                        });
+                    });
+                }
             });
         };
         if (delay > 0) window.setTimeout(begin, delay * 1000);
