@@ -6,9 +6,11 @@ import { Material } from './engine/material.js';
 import { loadTexture } from './engine/loader.js';
 import { Editor } from './editor/editor.js';
 import { GameRuntime } from './engine/runtime.js';
+import { AudioManager } from './engine/audio.js';
 
 const canvas = document.getElementById('viewport');
 const renderer = new Renderer(canvas);
+const audioManager = new AudioManager();
 const scene = new Scene();
 const camera = new Camera();
 camera.position = [0, 1.7, 4];
@@ -25,10 +27,8 @@ let measuredWorkMs = 0;
 let savedCamera = null;
 
 async function init() {
-    // Clear poisoned oversized scene cache from previous Chrome sessions
-    try { localStorage.removeItem("lightweight-3d-scenes"); } catch (e) { /* ignore */ }
-
     await renderer.ready;
+    await audioManager.ready;
 
     let tex = null;
     try {
@@ -49,7 +49,7 @@ async function init() {
     cube.position = [0, 0.5, 0];
     scene.add(cube);
 
-    editor = new Editor(scene, camera, renderer);
+    editor = new Editor(scene, camera, renderer, audioManager);
     if (tex) editor.textureLibrary.addTexture('example.webp', tex, './assets/textures/example.webp');
     editor.ui.refreshTextures();
     await editor.initializeScenes();
@@ -70,6 +70,7 @@ async function init() {
             camera.far = 600;
 
             runtime = new GameRuntime(renderer, scene, camera, {
+                audio: audioManager,
                 onUpdate: () => {}
             });
 
@@ -150,6 +151,7 @@ function loop() {
     scene.update(Math.min(0.1, (now - lastTime) / 1000));
     lastTime = now;
     editor.update();
+    audioManager.setListenerFromCamera(camera);
     renderer.render(scene, camera);
     measuredWorkMs += performance.now() - workStart;
     measuredFrames++;

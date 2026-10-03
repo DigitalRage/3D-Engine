@@ -202,6 +202,11 @@ export function createInspectorPanel(gl, textureLibrary, onSelectFace, onHistory
             currentMesh.updateRenderQueues();
         });
         info.appendChild(shading);
+        info.appendChild(addCheckbox('Double-sided geometry (slower)', !!currentMesh.material.doubleSided, checked => {
+            onHistory();
+            currentMesh.material.doubleSided = checked;
+            currentMesh.updateRenderQueues();
+        }));
         addVectorField('Position', currentMesh.position, (index, value) => { currentMesh.position[index] = value; });
         addVectorField('Rotation', currentMesh.rotation, (index, value) => { currentMesh.rotation[index] = value; }, true);
         addVectorField('Scale', currentMesh.scale, (index, value) => { currentMesh.scale[index] = value; });

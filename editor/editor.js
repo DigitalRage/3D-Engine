@@ -11,15 +11,18 @@ import { TextureLibrary } from './textureLibrary.js';
 import { SelectionModel } from './selection.js';
 import { executeMeshCommand, executeSceneCommand } from './ops/meshCommands.js';
 import { runMeshOperator } from './ops/meshOperators.js';
+import { createDefaultAudioSceneConfig, normalizeAudioSceneConfig } from '../engine/audio.js';
 
 export class Editor {
-    constructor(scene, camera, renderer) {
+    constructor(scene, camera, renderer, audioManager = null) {
         this.scene = scene;
         this.camera = camera;
         this.renderer = renderer;
         this.assetManager = new AssetManager();
         this.prefabManager = new PrefabManager(this.assetManager);
         this.textureLibrary = new TextureLibrary(renderer.gl, this.assetManager);
+        this.audioManager = audioManager;
+        this.scene.audio = normalizeAudioSceneConfig(this.scene.audio);
         this.undoStack = [];
         this.redoStack = [];
         this.maxHistoryLength = 100;
@@ -40,6 +43,7 @@ export class Editor {
         this.ui = createUI(this.uiRoot, {
             scene,
             gl: renderer.gl,
+            audioManager: this.audioManager,
             textureLibrary: this.textureLibrary,
             getSelectedItems: () => this.selectedMeshes,
             getSelectionCounts: () => ({
@@ -172,13 +176,14 @@ export class Editor {
     }
 
     async initializeScenes() {
+        await this.sceneManager.ready;
         if (!this.sceneManager.activeScene) {
             this.refreshSceneAssets();
             const data = await this.serializeSceneData();
             const record = await this.sceneManager.createScene(this.scene.name, data, { id: this.scene.assetId });
             record.data.sceneAssetId = record.id;
             this.scene.assetId = record.id;
-            try { this.sceneManager.persist(); } catch (e) { console.warn("Scene storage skipped:", e); }
+            await this.sceneManager.persist();
         } else {
             await this.sceneManager.initializeActiveScene();
         }
@@ -195,10 +200,11 @@ export class Editor {
             assetManifest: { version: 1, assets: [] },
             light: null,
             textureAssets: [],
+            audio: createDefaultAudioSceneConfig(),
             meshes: []
         });
         record.data.sceneAssetId = record.id;
-        try { this.sceneManager.persist(); } catch (e) { console.warn("Scene storage skipped:", e); }
+        await this.sceneManager.persist();
         await this.sceneManager.loadScene(record.id);
         this.ui.refreshScenes();
         return record;
@@ -233,6 +239,16 @@ export class Editor {
         if (!data || !Array.isArray(data.meshes)) throw new TypeError('The selected file is not a scene export');
         if (data.assetManifest) {
             const assetIds = this.assetManager.importManifest(data.assetManifest);
+            this.audioManager?.mergeManifestAssets?.(data.assetManifest.assets
+                .filter(asset => asset.type === 'audio' && asset.data?.soundId && asset.data?.path)
+                .map(asset => ({
+                    id: asset.data.soundId,
+                    name: asset.name,
+                    path: asset.data.path,
+                    loopable: asset.data.loopable !== false,
+                    tags: asset.data.tags || [],
+                    volume: asset.data.volume ?? 1
+                })));
             this.remapImportedSceneAssetIds(data, assetIds);
         }
         const record = await this.sceneManager.createScene(data.sceneName || file.name.replace(/\.[^.]+$/, '') || 'Imported Scene', data);
@@ -242,11 +258,7 @@ export class Editor {
             streaming: entry.streaming !== false,
             loaded: false
         }));
-        try {
-            try { this.sceneManager.persist(); } catch (e) { console.warn("Scene storage skipped:", e); }
-        } catch (error) {
-            console.warn('Scene imported in memory, but browser storage could not save it:', error);
-        }
+        await this.sceneManager.persist();
         await this.sceneManager.loadScene(record.id);
         this.ui.refreshScenes();
         return record;
@@ -274,13 +286,13 @@ export class Editor {
     }
 
     async addSceneReference(id) {
-        const result = this.sceneManager.addReference(this.sceneManager.activeSceneId, id);
+        const result = await this.sceneManager.addReference(this.sceneManager.activeSceneId, id);
         this.ui.refreshScenes();
         return result;
     }
 
-    removeSceneReference(id) {
-        const result = this.sceneManager.removeReference(this.sceneManager.activeSceneId, id);
+    async removeSceneReference(id) {
+        const result = await this.sceneManager.removeReference(this.sceneManager.activeSceneId, id);
         this.ui.refreshScenes();
         return result;
     }
@@ -318,6 +330,7 @@ export class Editor {
         this.scene.assetId = data.sceneAssetId || record.id;
         if (!this.scene.light) this.scene.light = new DirectionalLight();
         this.ui.refreshLight();
+        this.ui.refreshAudio?.();
         this.select(this.scene.meshes[0] || null);
         this.ui.refreshScenes();
         this.ui.refreshPrefabs();
@@ -388,6 +401,7 @@ export class Editor {
                     emission: [...(mesh.material.emission || [0, 0, 0])],
                     opacity: mesh.material.opacity ?? 1,
                     shading: mesh.material.shading || 'toon',
+                    doubleSided: !!mesh.material.doubleSided,
                     useTexture: !!mesh.material.useTexture,
                     textureAssetId: mesh.textureAssetId || null,
                     textureSlots: {
@@ -464,15 +478,32 @@ export class Editor {
             if (authoredMeshSet.has(mesh)) meshAssetIds.push(meshAsset.id);
         });
 
+        const audioAssetIds = [];
+        const usedSoundIds = new Set([
+            this.scene.audio?.music?.soundId,
+            ...(this.scene.audio?.actions || []).map(cue => cue.soundId)
+        ].filter(Boolean));
+        for (const soundId of usedSoundIds) {
+            const sound = this.audioManager?.getSound?.(soundId);
+            if (!sound) continue;
+            const audioAsset = this.assetManager.register({
+                id: `audio-${sound.id}`,
+                name: sound.name,
+                type: 'audio',
+                metadata: { path: sound.path, loopable: !!sound.loopable, tags: sound.tags || [] },
+                data: { soundId: sound.id, path: sound.path, loopable: !!sound.loopable, tags: sound.tags || [], volume: sound.volume ?? 1 }
+            });
+            audioAssetIds.push(audioAsset.id);
+        }
         this.assetManager.register({
             id: this.scene.assetId,
             name: this.scene.name || 'Scene',
             type: 'scene',
             resource: this.scene,
             metadata: { meshCount: meshAssetIds.length },
-            data: { meshAssetIds }
+            data: { meshAssetIds, audioAssetIds }
         });
-        this.assetManager.setDependencies(sceneAsset.id, meshAssetIds);
+        this.assetManager.setDependencies(sceneAsset.id, [...meshAssetIds, ...audioAssetIds]);
     }
 
     async importTexture(file) {
@@ -627,7 +658,7 @@ export class Editor {
             replacements.push([mesh, updatedData]);
         }
         for (const [mesh, data] of replacements) await this.replaceMeshFromPrefabData(mesh, data);
-        try { this.sceneManager.persist(); } catch (e) { console.warn("Scene storage skipped:", e); }
+        await this.sceneManager.persist();
         this.refreshSceneAssets();
         this.ui.refreshPrefabs();
         return prefab;
@@ -992,6 +1023,18 @@ export class Editor {
 
     async importSceneData(data, { reuseExistingAssets = false, includeLighting = true, setSceneId = false, refreshAssets = true, selectImported = true } = {}) {
         const assetIds = data.assetManifest ? this.assetManager.importManifest(data.assetManifest, { reuseExisting: reuseExistingAssets }) : new Map();
+        if (data.assetManifest) {
+            this.audioManager?.mergeManifestAssets?.(data.assetManifest.assets
+                .filter(asset => asset.type === 'audio' && asset.data?.soundId && asset.data?.path)
+                .map(asset => ({
+                    id: asset.data.soundId,
+                    name: asset.name,
+                    path: asset.data.path,
+                    loopable: asset.data.loopable !== false,
+                    tags: asset.data.tags || [],
+                    volume: asset.data.volume ?? 1
+                })));
+        }
         const reserveCollidingId = (id, type) => {
             if (id && !assetIds.has(id) && this.assetManager.get(id)) assetIds.set(id, this.assetManager.createId(type));
         };
@@ -1006,6 +1049,7 @@ export class Editor {
             });
         }
         if (setSceneId && data.sceneAssetId) this.scene.assetId = assetIds.get(data.sceneAssetId) || data.sceneAssetId;
+        this.scene.audio = normalizeAudioSceneConfig(data.audio || createDefaultAudioSceneConfig());
         if (includeLighting && data.light) {
             const importedLight = new DirectionalLight(data.light);
             if (this.scene.light) Object.assign(this.scene.light, importedLight);
@@ -1030,6 +1074,7 @@ export class Editor {
                 emission: meshData.emission || [0, 0, 0],
                 opacity: meshData.opacity ?? 1,
                 shading: meshData.shading || 'toon',
+                doubleSided: !!meshData.doubleSided,
                 useTexture: meshData.useTexture || !!meshData.textureAssetId,
                 texture: null,
                 albedo: null,
@@ -1038,8 +1083,14 @@ export class Editor {
                 name: meshData.materialName || 'Imported Material'
             });
             const mesh = new Mesh(materialData);
+            const staticOptimized = !!(meshData.staticOptimized || meshData.optimizedStatic);
             if (meshData.positions && meshData.faces) {
-                mesh.setTopology(meshData.positions, meshData.faces);
+                if (staticOptimized) {
+                    mesh.bakeFaceColors = true;
+                    mesh.setStaticTopology(meshData.positions, meshData.faces, meshData.faceColors || []);
+                } else {
+                    mesh.setTopology(meshData.positions, meshData.faces);
+                }
             } else if (meshData.polygons) {
                 mesh.polygons = meshData.polygons.map(polygon => polygon.map(vertex => [...vertex]));
             } else {
@@ -1064,16 +1115,19 @@ export class Editor {
             mesh.position = [...(meshData.position || [0, 0, 0])];
             mesh.rotation = [...(meshData.rotation || [0, 0, 0])];
             mesh.scale = [...(meshData.scale || [1, 1, 1])];
-            mesh.faceColors = (meshData.faceColors || []).map(color => [...color]);
-            mesh.faceUvs = (meshData.faceUvs || []).map(faceUvs => faceUvs.map(uv => [...uv]));
-            mesh.faceUvTransforms = (meshData.faceUvTransforms || []).map(transform => ({
-                scale: [...(transform.scale || [1, 1])],
-                offset: [...(transform.offset || [0, 0])],
-                rotation: transform.rotation || 0,
-                flipX: !!transform.flipX,
-                flipY: !!transform.flipY
-            }));
-            mesh.rebuildRenderData();
+            mesh.bakeFaceColors = staticOptimized ? true : !!meshData.bakeFaceColors;
+            if (!staticOptimized) {
+                mesh.faceColors = (meshData.faceColors || []).map(color => [...color]);
+                mesh.faceUvs = (meshData.faceUvs || []).map(faceUvs => faceUvs.map(uv => [...uv]));
+                mesh.faceUvTransforms = (meshData.faceUvTransforms || []).map(transform => ({
+                    scale: [...(transform.scale || [1, 1])],
+                    offset: [...(transform.offset || [0, 0])],
+                    rotation: transform.rotation || 0,
+                    flipX: !!transform.flipX,
+                    flipY: !!transform.flipY
+                }));
+                mesh.rebuildRenderData();
+            }
 
             const boneMap = new Map();
             (meshData.bones || []).forEach(boneData => {
@@ -1148,6 +1202,7 @@ export class Editor {
         if (refreshAssets) this.refreshSceneAssets();
         this.ui.refreshTextures();
         this.ui.refreshPrefabs();
+        this.ui.refreshAudio?.();
         if (selectImported && importedMeshes.length) this.select(importedMeshes[importedMeshes.length - 1]);
         return importedMeshes;
     }
@@ -1365,6 +1420,7 @@ export class Editor {
                 emission: [...mesh.material.emission],
                 opacity: mesh.material.opacity,
                 shading: mesh.material.shading,
+                doubleSided: !!mesh.material.doubleSided,
                 textureSlots: {
                     albedo: mesh.material.textureSlots?.albedo?.id || mesh.textureAssetId || null,
                     normal: mesh.material.textureSlots?.normal?.id || null,
@@ -1373,13 +1429,22 @@ export class Editor {
                     emission: mesh.material.textureSlots?.emission?.id || null
                 },
                 polygons: mesh.polygons,
+                // Mesh topology/material collections are observed Proxy arrays at runtime.
+                // Always convert them to plain arrays before SceneManager/IndexedDB gets a
+                // structuredClone() call; Proxy objects are not structured-cloneable.
                 positions: mesh.positions.map(position => [...position]),
                 faces: mesh.faces.map(face => [...face]),
-                faceColors: mesh.faceColors,
+                faceColors: mesh.faceColors.map(color => Array.isArray(color) ? [...color] : [1, 1, 1, 1]),
                 textureAssetId: mesh.textureAssetId,
-                faceTextureIds: mesh.faceTextureIds,
-                faceUvs: mesh.faceUvs,
-                faceUvTransforms: mesh.faceUvTransforms,
+                faceTextureIds: Array.from(mesh.faceTextureIds || []),
+                faceUvs: (mesh.faceUvs || []).map(faceUvs => (faceUvs || []).map(uv => [...uv])),
+                faceUvTransforms: (mesh.faceUvTransforms || []).map(transform => ({
+                    scale: [...(transform?.scale || [1, 1])],
+                    offset: [...(transform?.offset || [0, 0])],
+                    rotation: transform?.rotation || 0,
+                    flipX: !!transform?.flipX,
+                    flipY: !!transform?.flipY
+                })),
                 selectedFace: mesh.selectedFace,
                 selectedVertex: mesh.selectedVertex,
                 selectedBone: mesh.selectedBone,
@@ -1526,6 +1591,7 @@ export class Editor {
                 shadeColor: this.scene.light.shadeColor
             } : null,
             textureAssets: (await this.textureLibrary.getExportData()).filter(asset => reachableAssets.has(asset.id)),
+            audio: normalizeAudioSceneConfig(this.scene.audio),
             meshes: authoredMeshes.map(mesh => ({
                 assetId: mesh.assetId,
                 materialAssetId: mesh.material.assetId,
@@ -1538,14 +1604,28 @@ export class Editor {
                 scale: mesh.scale,
                 color: mesh.material.color,
                 shading: mesh.material.shading,
-                polygons: mesh.polygons,
+                doubleSided: !!mesh.material.doubleSided,
+                bakeFaceColors: !!mesh.bakeFaceColors,
+                staticOptimized: !!mesh.staticOptimized,
+                // Static merged environments retain indexed source topology; do not
+                // serialize the compatibility polygon view and materialize 100k+ arrays.
+                polygons: mesh.staticOptimized ? [] : mesh.polygons,
+                // Mesh topology/material collections are observed Proxy arrays at runtime.
+                // Always convert them to plain arrays before SceneManager/IndexedDB gets a
+                // structuredClone() call; Proxy objects are not structured-cloneable.
                 positions: mesh.positions.map(position => [...position]),
                 faces: mesh.faces.map(face => [...face]),
-                faceColors: mesh.faceColors,
+                faceColors: mesh.faceColors.map(color => Array.isArray(color) ? [...color] : [1, 1, 1, 1]),
                 textureAssetId: mesh.textureAssetId,
-                faceTextureIds: mesh.faceTextureIds,
-                faceUvs: mesh.faceUvs,
-                faceUvTransforms: mesh.faceUvTransforms,
+                faceTextureIds: Array.from(mesh.faceTextureIds || []),
+                faceUvs: (mesh.faceUvs || []).map(faceUvs => (faceUvs || []).map(uv => [...uv])),
+                faceUvTransforms: (mesh.faceUvTransforms || []).map(transform => ({
+                    scale: [...(transform?.scale || [1, 1])],
+                    offset: [...(transform?.offset || [0, 0])],
+                    rotation: transform?.rotation || 0,
+                    flipX: !!transform?.flipX,
+                    flipY: !!transform?.flipY
+                })),
                 vertexWeights: mesh.getVertexWeightData(),
                 animation: mesh.animationClip ? {
                     name: mesh.animationClip.name,

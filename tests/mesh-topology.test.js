@@ -103,3 +103,47 @@ test('editing one shared vertex updates every incident face', () => {
     assert.equal(mesh.polygons[0][0], mesh.polygons[1][0]);
     assert.deepEqual(mesh.polygons[1][0], [0.25, 0, 0]);
 });
+
+test('large static topology skips editor adjacency and builds render buffers directly', () => {
+    const mesh = new Mesh(new Material({ shading: 'toon' }));
+    mesh.bakeFaceColors = true;
+    mesh.setStaticTopology(
+        [[0,0,0],[1,0,0],[1,1,0],[0,1,0]],
+        [[0,1,2,3]],
+        [[0.2,0.4,0.8,1]]
+    );
+
+    assert.equal(mesh.staticOptimized, true);
+    assert.equal(mesh.edges.length, 0);
+    assert.equal(mesh.polygons.length, 1);
+    assert.deepEqual(mesh.polygons[0][0], [0,0,0]);
+    assert.equal(mesh.triangleCount, 2);
+    assert.equal(mesh.colors.length, 12);
+    assert.equal(mesh.faceColors[0][2], 0.8);
+});
+
+test('static mesh scene serialization data is structured-cloneable', () => {
+    const mesh = new Mesh(new Material({ shading: 'toon' }));
+    mesh.bakeFaceColors = true;
+    mesh.setStaticTopology(
+        [[0,0,0],[1,0,0],[1,1,0],[0,1,0]],
+        [[0,1,2,3]],
+        [[0.2,0.4,0.8,1]]
+    );
+
+    const serialized = {
+        positions: mesh.positions.map(position => [...position]),
+        faces: mesh.faces.map(face => [...face]),
+        faceColors: mesh.faceColors.map(color => [...color]),
+        faceTextureIds: Array.from(mesh.faceTextureIds || []),
+        faceUvs: (mesh.faceUvs || []).map(faceUvs => (faceUvs || []).map(uv => [...uv])),
+        faceUvTransforms: (mesh.faceUvTransforms || []).map(transform => ({
+            scale: [...(transform.scale || [1, 1])],
+            offset: [...(transform.offset || [0, 0])],
+            rotation: transform.rotation || 0,
+            flipX: !!transform.flipX,
+            flipY: !!transform.flipY
+        }))
+    };
+    assert.doesNotThrow(() => structuredClone(serialized));
+});

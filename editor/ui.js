@@ -3,11 +3,12 @@ import { createInspectorPanel } from './panels/inspector.js';
 import { createAssetsPanel } from './panels/assets.js';
 import { createBonesPanel } from './panels/bones.js';
 import { createLightingPanel } from './panels/lighting.js';
+import { createAudioPanel } from './panels/audio.js';
 import { DirectionalLight } from '../engine/light.js';
 import { dispatchEditorShortcut } from './shortcuts.js';
 
 export function createUI(root, options) {
-    const { scene, onSelect, onSelectFace, onSetPickMode, onAddCube, onAddPlane, onAddSphere, onAddCylinder, onAddBatch, onDuplicate, onAddFace, onExtrudeFace, onMergeFace, onMergeVertices, onAddVertex, onAddBone, onRemoveBone, onCreateAnimation, onKeyPose, onDeleteBoneKeys, onSeekAnimation, onToggleAnimation, onRenameAnimation, onSetAnimationDuration, onImportMesh, onImportTexture, onDelete, onReorderMesh, onResetCamera, onExport, onUndo, onRedo, onHistory = () => {}, onKnifeTool, onBevel, onInset, onLoopCut, onBridge, onFill, onGridFill, onDissolve, onSplit, onSeparate, onTriangulate, onQuadRebuild, onRecalculateNormals, onFlipNormals } = options;
+    const { scene, audioManager, onSelect, onSelectFace, onSetPickMode, onAddCube, onAddPlane, onAddSphere, onAddCylinder, onAddBatch, onDuplicate, onAddFace, onExtrudeFace, onMergeFace, onMergeVertices, onAddVertex, onAddBone, onRemoveBone, onCreateAnimation, onKeyPose, onDeleteBoneKeys, onSeekAnimation, onToggleAnimation, onRenameAnimation, onSetAnimationDuration, onImportMesh, onImportTexture, onDelete, onReorderMesh, onResetCamera, onExport, onUndo, onRedo, onHistory = () => {}, onKnifeTool, onBevel, onInset, onLoopCut, onBridge, onFill, onGridFill, onDissolve, onSplit, onSeparate, onTriangulate, onQuadRebuild, onRecalculateNormals, onFlipNormals } = options;
     const sceneActions = options.sceneActions || {};
     root.style.pointerEvents = 'none';
     root.innerHTML = '';
@@ -21,7 +22,7 @@ export function createUI(root, options) {
         .polygon-counter { position: fixed; right: 12px; bottom: 44px; z-index: 20; max-width: calc(100vw - 24px); padding: 6px 9px; color: #d7e8fa; background: rgba(15, 23, 34, 0.94); border: 1px solid rgba(130, 165, 202, 0.4); font: 12px/1.3 ui-monospace, monospace; font-variant-numeric: tabular-nums; pointer-events: none; }
         .viewport-stats { position: fixed; left: 12px; bottom: 12px; z-index: 20; padding: 6px 9px; color: #d7e8fa; background: rgba(15, 23, 34, 0.94); border: 1px solid rgba(130, 165, 202, 0.4); font: 12px/1.3 ui-monospace, monospace; font-variant-numeric: tabular-nums; pointer-events: none; }
         .operator-status { position: fixed; left: 12px; bottom: 44px; z-index: 20; max-width: min(50vw, 420px); overflow: hidden; padding: 6px 9px; color: #d7e8fa; background: rgba(15, 23, 34, 0.94); border: 1px solid rgba(130, 165, 202, 0.4); font: 12px/1.3 ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
-        .editor-shell { position: fixed; inset: 0; z-index: 10; display: grid; grid-template-columns: minmax(210px, 18vw) minmax(0, 1fr) minmax(250px, 22vw); grid-template-rows: auto minmax(180px, 1fr) minmax(190px, 28vh); grid-template-areas: 'toolbar toolbar toolbar' 'hierarchy viewport inspector' 'assets assets animation'; box-sizing: border-box; overflow: hidden; pointer-events: none; }
+        .editor-shell { position: fixed; inset: 0; z-index: 10; display: grid; grid-template-columns: minmax(210px, 17vw) minmax(0, 1fr) minmax(220px, 19vw); grid-template-rows: auto minmax(180px, 1fr) minmax(170px, 24vh); grid-template-areas: 'toolbar toolbar toolbar' 'hierarchy viewport inspector' 'assets audio animation'; box-sizing: border-box; overflow: hidden; pointer-events: none; }
         .editor-toolbar { grid-area: toolbar; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 5px 8px; background: rgba(16, 20, 25, 0.98); border-bottom: 1px solid #343b43; pointer-events: auto; }
         .editor-toolbar-head { position: relative; display: flex; align-items: center; gap: 6px; min-height: 26px; }
         .tool-group { min-width: 0; }
@@ -58,6 +59,7 @@ export function createUI(root, options) {
         .panel-disclosure[data-dock='hierarchy'] { grid-area: hierarchy; }
         .panel-disclosure[data-dock='inspector'] { grid-area: inspector; }
         .panel-disclosure[data-dock='assets'] { grid-area: assets; }
+        .panel-disclosure[data-dock='audio'] { grid-area: audio; }
         .panel-disclosure[data-dock='animation'] { grid-area: animation; }
         .panel-disclosure:not([open]) { height: auto !important; }
         .panel-disclosure[open] { min-height: 0; }
@@ -111,6 +113,15 @@ export function createUI(root, options) {
         .skinning-disclosure .bone-weight-group { padding: 8px 0 0; border-top: 0; }
         .bone-weight-group .editor-button { margin: 4px 4px 0 0; }
         .asset-item { padding: 5px 7px; background: #101722; border: 1px solid #26384d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .audio-control-row { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin: 6px 0; }
+        .audio-control-row > .editor-input { flex: 1 1 120px; min-width: 100px; }
+        .audio-control-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+        .audio-action-list { display: grid; gap: 7px; }
+        .audio-action-row { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(110px, 1fr) 78px 64px minmax(95px, 1fr) 76px 64px 50px auto; gap: 4px; padding: 6px; border: 1px solid #26384d; background: #101722; }
+        .audio-action-row .field-group { margin: 0; min-width: 0; }
+        .audio-action-row .field-label { display: none; }
+        .audio-action-row input, .audio-action-row select { min-width: 0; }
+
         .uv-workspace { grid-area: viewport; display: none; flex-direction: column; min-width: 0; min-height: 0; box-sizing: border-box; padding: 10px; background: rgba(24, 28, 33, 0.98); border: 1px solid #343b43; pointer-events: auto; }
         .uv-workspace-title { margin: 0 0 8px; color: #9ed8ff; font-size: 11px; text-transform: uppercase; }
         .uv-image-row { display: flex; align-items: center; gap: 8px; max-width: 400px; margin-bottom: 8px; color: #9aa9ba; font-size: 11px; text-transform: uppercase; }
@@ -122,7 +133,7 @@ export function createUI(root, options) {
         .uv-canvas:active { cursor: grabbing; }
         .editor-shell.uv-mode .uv-workspace { display: flex; }
         .editor-shell.uv-mode .editor-panels { display: none; }
-        @media (max-width: 760px) { .editor-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(150px, 36vh) minmax(110px, 22vh) minmax(110px, 22vh) minmax(110px, 22vh) minmax(110px, 22vh); grid-template-areas: 'toolbar' 'viewport' 'hierarchy' 'inspector' 'assets' 'animation'; overflow: auto; } .editor-toolbar { position: sticky; top: 0; z-index: 5; } .panel-disclosure[data-floating='true'] { max-width: calc(100vw - 16px); } }
+        @media (max-width: 760px) { .editor-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(150px, 36vh) minmax(110px, 20vh) minmax(110px, 20vh) minmax(110px, 20vh) minmax(145px, 22vh) minmax(160px, 24vh); grid-template-areas: 'toolbar' 'viewport' 'hierarchy' 'inspector' 'assets' 'audio' 'animation'; overflow: auto; } .editor-toolbar { position: sticky; top: 0; z-index: 5; } .panel-disclosure[data-floating='true'] { max-width: calc(100vw - 16px); } .audio-action-row { grid-template-columns: 1fr 1fr 1fr; } }
     `;
     root.appendChild(style);
     const fpsReadout = document.createElement('div');
@@ -864,6 +875,7 @@ export function createUI(root, options) {
     });
     const inspector = createInspectorPanel(options.gl, options.textureLibrary, onSelectFace, onHistory);
     const assets = createAssetsPanel(options.textureLibrary, onImportMesh, onImportTexture, options.prefabActions);
+    const audio = createAudioPanel(scene, audioManager, onHistory);
     const bones = createBonesPanel({ onAddBone, onRemoveBone, onCreateAnimation, onKeyPose, onDeleteBoneKeys, onSeekAnimation, onToggleAnimation, onRenameAnimation, onSetAnimationDuration, onHistory, onChange: options.onBonePoseChange });
     if (!scene.light) scene.light = new DirectionalLight();
     const lighting = createLightingPanel(scene.light, onHistory);
@@ -873,6 +885,7 @@ export function createUI(root, options) {
         hierarchy: { dock: 'hierarchy', open: true },
         inspector: { dock: 'inspector', open: true },
         assets: { dock: 'assets', open: true },
+        audio: { dock: 'audio', open: true },
         'rig-and-animation': { dock: 'animation', open: true },
         'key-light': { dock: 'inspector', open: false, floating: true }
     };
@@ -958,7 +971,8 @@ export function createUI(root, options) {
             delete disclosure.dataset.dragY;
             const dock = event.clientX < 36 ? 'hierarchy'
                 : event.clientX > window.innerWidth - 36 ? 'inspector'
-                    : event.clientY > window.innerHeight - 36 ? (event.clientX < window.innerWidth / 2 ? 'assets' : 'animation')
+                    : event.clientY > window.innerHeight - 36
+                        ? (event.clientX < window.innerWidth / 3 ? 'assets' : event.clientX < window.innerWidth * 2 / 3 ? 'audio' : 'animation')
                         : null;
             if (dock) {
                 const occupied = Array.from(panels.children).find(panel => panel !== disclosure && panel.dataset.dock === dock && panel.dataset.floating !== 'true');
@@ -1019,8 +1033,9 @@ export function createUI(root, options) {
     panels.appendChild(panelDisclosure('Hierarchy', hierarchy.element, 0));
     panels.appendChild(panelDisclosure('Inspector', inspector.element, 1));
     panels.appendChild(panelDisclosure('Assets', assets.element, 2));
-    panels.appendChild(panelDisclosure('Rig and Animation', bones.element, 3));
-    panels.appendChild(panelDisclosure('Key Light', lighting.element, 4));
+    panels.appendChild(panelDisclosure('Audio', audio.element, 3));
+    panels.appendChild(panelDisclosure('Rig and Animation', bones.element, 4));
+    panels.appendChild(panelDisclosure('Key Light', lighting.element, 5));
     saveCurrentLayout = () => panels.querySelectorAll('.panel-disclosure').forEach(persistPanelLayout);
     resetCurrentLayout = () => {
         try { localStorage.removeItem(layoutStorageKey); } catch {}
@@ -1055,6 +1070,7 @@ export function createUI(root, options) {
         setStatus: message => { operatorStatus.textContent = message; },
         setCameraView: view => cameraButtons.forEach((element, key) => element.classList.toggle('selected', key === view)),
         refreshTextures: () => { assets.refresh(); inspector.refresh(); refreshUvTextures(); },
+        refreshAudio: audio.refresh,
         refreshPrefabs: assets.refreshPrefabs,
         refreshScenes,
         refreshLight: lighting.refresh,

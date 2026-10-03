@@ -106,6 +106,7 @@ export class Renderer {
         gl.clearColor(0.1, 0.1, 0.15, 1.0);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         gl.enable(gl.DEPTH_TEST);
+        gl.depthFunc(gl.LESS);
 
         gl.useProgram(this.program);
         const frameId = ++this.frameId;
@@ -133,24 +134,28 @@ export class Renderer {
         // Skip full raytraced shadows when scene is huge (keeps anime mode interactive for thousands of objects).
         // Hard shadows still apply for smaller scenes; large scenes keep flat toon lighting only.
         const meshCount = scene.meshes.length;
-        const shadowSignature = (this.renderMode === 'anime' && meshCount <= 800) ? makeShadowSignature(scene) : null;
-        if (this.renderMode === 'anime' && meshCount <= 800 && shadowSignature !== this.shadowSignature) {
+        const sceneTriangleCount = scene.meshes.reduce((sum, mesh) => sum + (mesh.triangleCount || 0), 0);
+        const shadowEligible = meshCount <= 800 && sceneTriangleCount <= 20000;
+        const shadowSignature = (this.renderMode === 'anime' && shadowEligible) ? makeShadowSignature(scene) : null;
+        if (this.renderMode === 'anime' && shadowEligible && shadowSignature !== this.shadowSignature) {
             const tracedShadows = traceDirectionalShadowFaces(scene, light);
             scene.meshes.forEach(mesh => {
                 const next = tracedShadows.get(mesh) || Array(mesh.faceCount).fill(false);
                 const previous = mesh.shadowedFaces || [];
                 if (next.length !== previous.length || next.some((shadowed, index) => shadowed !== previous[index])) {
                     mesh.shadowedFaces = next;
+                    mesh.shadowedFaceCount = next.reduce((count, value) => count + (value ? 1 : 0), 0);
                     mesh.shadowVersion = (mesh.shadowVersion || 0) + 1;
                 }
             });
             this.shadowSignature = shadowSignature;
-        } else if (this.renderMode !== 'anime' || meshCount > 800) {
-            if (meshCount > 800) {
-                // Clear per-face shadow flags so instance keys stay stable
+        } else if (this.renderMode !== 'anime' || !shadowEligible) {
+            if (!shadowEligible) {
+                // Avoid per-face ray tracing on very dense or aggressively merged scenes.
                 scene.meshes.forEach(mesh => {
-                    if (mesh.shadowedFaces?.length) {
-                        mesh.shadowedFaces = Array(mesh.faceCount).fill(false);
+                    if (mesh.shadowedFaces?.length || mesh.shadowedFaceCount) {
+                        mesh.shadowedFaces = [];
+                        mesh.shadowedFaceCount = 0;
                         mesh.shadowVersion = (mesh.shadowVersion || 0) + 1;
                     }
                 });
@@ -159,6 +164,7 @@ export class Renderer {
         }
 
         if (this.renderMode === 'wireframe') {
+            gl.disable(gl.CULL_FACE);
             stats.triangles = scene.meshes.reduce((sum, mesh) => sum + mesh.triangleCount, 0);
             scene.meshes.forEach(mesh => mesh.draw(gl, this.program, null, frameId, this.renderMode, stats));
             this.frameStats = stats;
@@ -202,17 +208,24 @@ export class Renderer {
 
         gl.depthMask(true);
         const MAX_INSTANCES = 512;
+        const opaqueCommands = [];
         for (const meshes of instanceGroups.values()) {
             if (meshes.length > 1) {
                 for (let i = 0; i < meshes.length; i += MAX_INSTANCES) {
-                    this.drawInstancedMeshes(meshes.slice(i, i + MAX_INSTANCES), frameId, stats);
+                    const chunk = meshes.slice(i, i + MAX_INSTANCES);
+                    opaqueCommands.push({ kind: 'instances', meshes: chunk, distance: distanceSqToMesh(chunk[0], camera) });
                 }
             } else {
                 opaqueMeshes.push(meshes[0]);
             }
         }
-        for (const mesh of opaqueMeshes) {
-            mesh.draw(gl, this.program, mesh.opaqueFaceIndices, frameId, this.renderMode, stats);
+        opaqueMeshes.forEach(mesh => opaqueCommands.push({ kind: 'mesh', mesh, distance: distanceSqToMesh(mesh, camera) }));
+        opaqueCommands.sort((a, b) => a.distance - b.distance);
+        for (const command of opaqueCommands) {
+            const material = command.kind === 'mesh' ? command.mesh.material : command.meshes[0].material;
+            setBackfaceCulling(gl, material);
+            if (command.kind === 'instances') this.drawInstancedMeshes(command.meshes, frameId, stats);
+            else command.mesh.draw(gl, this.program, command.mesh.opaqueFaceIndices, frameId, this.renderMode, stats);
         }
         if (transparentFaces.length) {
             gl.enable(gl.BLEND);
@@ -220,6 +233,7 @@ export class Renderer {
             transparentFaces.sort((a, b) => b.distance - a.distance);
             gl.depthMask(false);
             for (const face of transparentFaces) {
+                setBackfaceCulling(gl, face.mesh.material);
                 face.mesh.draw(gl, this.program, [face.faceIndex], frameId, this.renderMode, stats);
             }
             gl.depthMask(true);
@@ -261,7 +275,7 @@ export class Renderer {
             gl.uniform4f(uniforms.uUVTransform, batch.transform.scale[0] * (batch.transform.flipX ? -1 : 1), batch.transform.scale[1] * (batch.transform.flipY ? -1 : 1), batch.transform.offset[0], batch.transform.offset[1]);
             gl.uniform1f(uniforms.uUVRotation, batch.transform.rotation);
             gl.uniform2f(uniforms.uUVCenter, batch.uvCenter[0], batch.uvCenter[1]);
-            extension.drawElementsInstancedANGLE(gl.TRIANGLES, batch.count, gl.UNSIGNED_SHORT, batch.offset * 2, meshes.length);
+            extension.drawElementsInstancedANGLE(gl.TRIANGLES, batch.count, template.indexType, batch.offset * template.indexBytes, meshes.length);
             stats.drawCalls++;
             stats.triangles += batch.count / 3 * meshes.length;
         });
@@ -322,6 +336,7 @@ export class Renderer {
         stats.drawCalls++;
         gl.depthMask(true);
         gl.enable(gl.DEPTH_TEST);
+        gl.depthFunc(gl.LESS);
     }
 }
 
@@ -399,23 +414,36 @@ function extractFrustumPlanes(view, proj) {
 }
 
 function meshInFrustum(mesh, planes) {
-    const min = mesh.boundsMin;
-    const max = mesh.boundsMax;
-    if (!min || !max) return true;
-    const pos = mesh.position;
-    const sc = mesh.scale || [1, 1, 1];
-    // Conservative world-space radius (handles non-uniform scale)
-    const hx = Math.max(Math.abs(min[0]), Math.abs(max[0])) * Math.abs(sc[0]);
-    const hy = Math.max(Math.abs(min[1]), Math.abs(max[1])) * Math.abs(sc[1]);
-    const hz = Math.max(Math.abs(min[2]), Math.abs(max[2])) * Math.abs(sc[2]);
-    const radius = Math.hypot(hx, hy, hz) * 1.05; // small pad against edge cases
-    const cx = pos[0];
-    const cy = pos[1];
-    const cz = pos[2];
+    const center = mesh.boundsCenter;
+    const localRadius = Number(mesh.boundsRadius) || 0;
+    if (!center || !localRadius) return true;
+    const model = mesh.getModelMatrix();
+    const worldCenter = transformPoint(model, center);
+    const scale = mesh.scale || [1, 1, 1];
+    const radius = localRadius * Math.max(Math.abs(scale[0]), Math.abs(scale[1]), Math.abs(scale[2]), 1e-6) * 1.03;
     for (let i = 0; i < planes.length; i++) {
         const plane = planes[i];
-        const dist = plane[0] * cx + plane[1] * cy + plane[2] * cz + plane[3];
+        const dist = plane[0] * worldCenter[0] + plane[1] * worldCenter[1] + plane[2] * worldCenter[2] + plane[3];
         if (dist < -radius) return false;
     }
     return true;
+}
+
+function distanceSqToMesh(mesh, camera) {
+    const center = mesh.boundsCenter;
+    const model = mesh.getModelMatrix();
+    const worldCenter = center ? transformPoint(model, center) : [mesh.position[0], mesh.position[1], mesh.position[2]];
+    const dx = worldCenter[0] - camera.position[0];
+    const dy = worldCenter[1] - camera.position[1];
+    const dz = worldCenter[2] - camera.position[2];
+    return dx * dx + dy * dy + dz * dz;
+}
+
+function setBackfaceCulling(gl, material) {
+    gl.frontFace(gl.CCW);
+    if (material?.doubleSided) gl.disable(gl.CULL_FACE);
+    else {
+        gl.enable(gl.CULL_FACE);
+        gl.cullFace(gl.BACK);
+    }
 }

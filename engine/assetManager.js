@@ -224,5 +224,8 @@ export class AssetManager {
 
 function cloneJson(value) {
     if (value === null || value === undefined) return null;
+    if (typeof structuredClone === 'function') {
+        try { return structuredClone(value); } catch {}
+    }
     return JSON.parse(JSON.stringify(value));
 }

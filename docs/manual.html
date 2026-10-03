@@ -182,5 +182,17 @@ runtime.play();
       <p style="margin-top:3rem;color:var(--muted);font-size:0.85rem;">Flat Shaded 3D Engine — anime-first editor &amp; runtime. See also <a href="../README.md">README.md</a>.</p>
     </main>
   </div>
+
+<section>
+<h2>OGG Audio</h2>
+<p>The Audio panel reads <code>assets/sound/index.json</code>. Put OGG files in <code>assets/sound/</code> and run <code>node tools/build-sound-manifest.mjs</code> to make them selectable.</p>
+<p>Audio supports background music, looping, crossfades, previews, four mixer buses, queue/overlap/replace action cues, cooldowns, polyphony limits, playback-rate variation, and optional 3D spatial positioning.</p>
+<p>In play mode, use <code>rt.playSound('sound-id')</code>, <code>rt.queueSound('sound-id')</code>, or <code>rt.triggerAudioAction('player.jump', { position: [x, y, z] })</code>.</p>
+</section>
+<section>
+<h2>Rendering Performance</h2>
+<p>The renderer keeps the depth buffer enabled so nearer surfaces correctly occlude farther surfaces. Opaque geometry is additionally sorted front-to-back and back-face culled in hardware unless a material is marked double-sided. Frustum tests use cached local bounding spheres transformed into world space, which is cheaper and more correct for off-center meshes.</p>
+</section>
+
 </body>
 </html>

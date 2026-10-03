@@ -19,6 +19,7 @@ export class GameRuntime {
         this.scripts = new Map();
         this.onUpdate = options.onUpdate || null;
         this.onRender = options.onRender || null;
+        this.audio = options.audio || null;
         this.lastTime = performance.now();
         this._raf = null;
         this.fixedDt = 1 / 60;
@@ -31,6 +32,8 @@ export class GameRuntime {
         if (this.playing) return;
         this.playing = true;
         this.lastTime = performance.now();
+        this.audio?.configureScene(this.scene.audio || {});
+        this.audio?.setListenerFromCamera(this.camera);
         this.loop();
     }
 
@@ -44,6 +47,7 @@ export class GameRuntime {
     stop() {
         this.pause();
         this.elapsed = 0;
+        this.audio?.stopAll({ owner: 'runtime', fade: 0.08 });
         this.scene.meshes.forEach(m => {
             if (m.animationPlayer) m.animationPlayer.stop();
         });
@@ -55,6 +59,7 @@ export class GameRuntime {
         let dt = Math.min(0.1, (now - this.lastTime) / 1000) * this.timeScale;
         this.lastTime = now;
         this.elapsed += dt;
+        this.audio?.setListenerFromCamera(this.camera);
 
         this.accumulator += dt;
         while (this.accumulator >= this.fixedDt) {
@@ -86,6 +91,19 @@ export class GameRuntime {
 
     removeScript(key) {
         this.scripts.delete(key);
+    }
+
+    /** Trigger a scene-configured sound action, e.g. rt.triggerAudioAction('player.jump'). */
+    triggerAudioAction(action, payload = {}) {
+        return this.audio?.triggerAction(action, payload) || [];
+    }
+
+    playSound(soundId, options = {}) {
+        return this.audio?.play(soundId, { ...options, owner: options.owner || 'runtime' }) || null;
+    }
+
+    queueSound(soundId, options = {}) {
+        return this.audio?.enqueue(soundId, { ...options, owner: options.owner || 'runtime' }) || null;
     }
 
     /**

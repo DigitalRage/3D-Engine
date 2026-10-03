@@ -1,4 +1,5 @@
 import { DirectionalLight } from './light.js';
+import { createDefaultAudioSceneConfig } from './audio.js';
 
 export class Scene {
     constructor() {
@@ -9,6 +10,7 @@ export class Scene {
         this.assetId = null;
         this.meshes = [];
         this.light = new DirectionalLight();
+        this.audio = createDefaultAudioSceneConfig();
     }
 
     get meshes() { return this._meshes; }

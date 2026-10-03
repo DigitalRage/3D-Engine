@@ -15,6 +15,7 @@ export class Material {
         metallicMap = null,
         emissionMap = null,
         textureSlots = null,
+        doubleSided = false,
         assetId = null,
         name = 'Material'
     } = {}) {
@@ -29,6 +30,7 @@ export class Material {
         this.emission = Array.isArray(emission) ? [...emission] : [0, 0, 0];
         this.shading = shading || 'toon';
         this.useTexture = !!useTexture || !!texture || !!albedo;
+        this.doubleSided = !!doubleSided;
         const slots = textureSlots || {
             albedo: texture ?? albedo ?? null,
             normal: normal ?? null,
@@ -55,6 +57,7 @@ export class Material {
             emission: data.emission ?? [0, 0, 0],
             opacity: data.opacity ?? (data.color?.[3] ?? 1),
             useTexture: data.useTexture ?? !!(data.texture || data.albedo),
+            doubleSided: data.doubleSided ?? false,
             texture: data.texture ?? data.albedo ?? null,
             shading: data.shading ?? 'toon',
             albedo: data.albedo ?? data.texture ?? null,
@@ -109,6 +112,7 @@ export class Material {
             emission: [...this.emission],
             opacity: this.opacity,
             shading: this.shading,
+            doubleSided: this.doubleSided,
             textureSlots: {
                 albedo: slotValue(this.textureSlots.albedo),
                 normal: slotValue(this.textureSlots.normal),

@@ -1,9 +1,12 @@
+import { IndexedDbSceneStore } from './sceneStorage.js';
+
 const SCENE_STORAGE_VERSION = 1;
 
 export class SceneManager {
     constructor({
         storageKey = 'lightweight-3d-scenes',
         storage = getLocalStorage(),
+        sceneStore = null,
         serializeActive = async () => null,
         activateScene = async () => {},
         loadSubScene = async () => {},
@@ -11,39 +14,81 @@ export class SceneManager {
     } = {}) {
         this.storageKey = storageKey;
         this.storage = storage;
+        this.sceneStore = sceneStore || new IndexedDbSceneStore();
+        this.persistenceMode = this.sceneStore.supported ? 'indexeddb' : 'localstorage';
         this.serializeActive = serializeActive;
         this.activateScene = activateScene;
         this.loadSubSceneCallback = loadSubScene;
         this.unloadSubSceneCallback = unloadSubScene;
         this.scenes = new Map();
         this.activeSceneId = null;
-        this.restore();
+        this._persistQueue = Promise.resolve();
+        this.ready = this.restore();
     }
 
-    restore() {
-        if (!this.storage) return false;
-        try {
-            const document = JSON.parse(this.storage.getItem(this.storageKey) || 'null');
-            if (document?.version !== SCENE_STORAGE_VERSION || !Array.isArray(document.scenes)) return false;
-            for (const source of document.scenes) {
-                if (!source || typeof source.id !== 'string' || !source.id || !source.data || typeof source.data !== 'object') continue;
-                if (this.scenes.has(source.id)) continue;
-                this.scenes.set(source.id, {
-                    id: source.id,
-                    name: String(source.name || 'Scene'),
-                    data: cloneJson(source.data),
-                    references: uniqueStrings(source.references),
-                    subScenes: normalizeSubScenes(source.subScenes),
-                    updatedAt: Number(source.updatedAt) || 0
-                });
+    async restore() {
+        this.scenes.clear();
+        this.activeSceneId = null;
+
+        let document = null;
+        let loadedFromLegacyStorage = false;
+
+        if (this.sceneStore?.supported) {
+            try {
+                document = await this.sceneStore.get(this.storageKey);
+            } catch {
+                // Fall through to localStorage below.
             }
-            this.activeSceneId = this.scenes.has(document.activeSceneId) ? document.activeSceneId : this.scenes.keys().next().value || null;
-            return this.scenes.size > 0;
-        } catch {
-            this.scenes.clear();
-            this.activeSceneId = null;
+        }
+
+        if (!isValidSceneDocument(document) && this.storage) {
+            try {
+                document = JSON.parse(this.storage.getItem(this.storageKey) || 'null');
+                loadedFromLegacyStorage = isValidSceneDocument(document);
+            } catch {
+                document = null;
+            }
+        }
+
+        if (!isValidSceneDocument(document)) {
+            this.persistenceMode = this.sceneStore?.supported ? 'indexeddb' : 'localstorage';
             return false;
         }
+
+        this.hydrate(document);
+
+        if (this.sceneStore?.supported) {
+            try {
+                await this.sceneStore.set(this.storageKey, document);
+                this.persistenceMode = 'indexeddb';
+                if (loadedFromLegacyStorage) {
+                    try { this.storage?.removeItem(this.storageKey); } catch {}
+                }
+            } catch {
+                this.persistenceMode = 'localstorage';
+            }
+        } else {
+            this.persistenceMode = 'localstorage';
+        }
+        return this.scenes.size > 0;
+    }
+
+    hydrate(document) {
+        for (const source of document.scenes) {
+            if (!source || typeof source.id !== 'string' || !source.id || !source.data || typeof source.data !== 'object') continue;
+            if (this.scenes.has(source.id)) continue;
+            this.scenes.set(source.id, {
+                id: source.id,
+                name: String(source.name || 'Scene'),
+                data: cloneJson(source.data),
+                references: uniqueStrings(source.references),
+                subScenes: normalizeSubScenes(source.subScenes),
+                updatedAt: Number(source.updatedAt) || 0
+            });
+        }
+        this.activeSceneId = this.scenes.has(document.activeSceneId)
+            ? document.activeSceneId
+            : this.scenes.keys().next().value || null;
     }
 
     list() {
@@ -90,7 +135,7 @@ export class SceneManager {
             this.activeSceneId = sceneId;
             if (activate) await this.activateScene(cloneJson(scene.data), scene);
         }
-        this.persist();
+        await this.persist();
         return scene;
     }
 
@@ -103,7 +148,7 @@ export class SceneManager {
             scene.data = cloneJson(data);
         }
         scene.updatedAt = Date.now();
-        this.persist();
+        await this.persist();
         return scene;
     }
 
@@ -114,7 +159,7 @@ export class SceneManager {
         for (const subScene of scene.subScenes) {
             if (!subScene.streaming) await this.loadSubScene(scene.id, subScene.sceneId);
         }
-        this.persist();
+        await this.persist();
         return scene;
     }
 
@@ -129,7 +174,7 @@ export class SceneManager {
         for (const subScene of target.subScenes) {
             if (!subScene.streaming && !subScene.loaded) await this.loadSubScene(target.id, subScene.sceneId);
         }
-        this.persist();
+        await this.persist();
         return target;
     }
 
@@ -142,7 +187,7 @@ export class SceneManager {
         const duplicate = await this.createScene(name || `${source.name} Copy`, clonedData, { id: sceneId });
         duplicate.references = source.references.map(reference => reference === id ? sceneId : reference);
         duplicate.subScenes = source.subScenes.map(subScene => ({ ...subScene, loaded: false }));
-        this.persist();
+        await this.persist();
         return duplicate;
     }
 
@@ -162,45 +207,45 @@ export class SceneManager {
             scene.subScenes = scene.subScenes.filter(subScene => subScene.sceneId !== id);
         }
         this.scenes.delete(id);
-        this.persist();
+        await this.persist();
         return true;
     }
 
-    renameScene(id, name) {
+    async renameScene(id, name) {
         const scene = this.get(id);
         const nextName = String(name || '').trim();
         if (!scene || !nextName) return false;
         scene.name = nextName;
         scene.updatedAt = Date.now();
-        this.persist();
+        await this.persist();
         return true;
     }
 
-    addReference(sceneId, referencedSceneId) {
+    async addReference(sceneId, referencedSceneId) {
         const scene = this.get(sceneId);
         if (!scene || !this.scenes.has(referencedSceneId)) throw new Error('Both referenced scenes must exist');
         if (sceneId === referencedSceneId) throw new Error('A scene cannot reference itself');
         if (!scene.references.includes(referencedSceneId)) scene.references.push(referencedSceneId);
-        this.persist();
+        await this.persist();
         return true;
     }
 
-    removeReference(sceneId, referencedSceneId) {
+    async removeReference(sceneId, referencedSceneId) {
         const scene = this.get(sceneId);
         if (!scene) return false;
         const referenceCount = scene.references.length;
         scene.references = scene.references.filter(id => id !== referencedSceneId);
-        if (scene.references.length !== referenceCount) this.persist();
+        if (scene.references.length !== referenceCount) await this.persist();
         return scene.references.length !== referenceCount;
     }
 
-    addSubScene(parentId, childId, { streaming = true } = {}) {
+    async addSubScene(parentId, childId, { streaming = true } = {}) {
         const parent = this.get(parentId);
         if (!parent || !this.scenes.has(childId)) throw new Error('Both sub-scenes must exist');
         if (parentId === childId || this.hasSubScenePath(childId, parentId)) throw new Error('Sub-scene relationships cannot contain cycles');
         if (parent.subScenes.some(subScene => subScene.sceneId === childId)) return false;
         parent.subScenes.push({ sceneId: childId, streaming: !!streaming, loaded: false });
-        this.persist();
+        await this.persist();
         if (!streaming && parentId === this.activeSceneId) return this.loadSubScene(parentId, childId);
         return true;
     }
@@ -214,7 +259,7 @@ export class SceneManager {
         if (link.loaded) return false;
         await this.loadSubSceneCallback(child.id, cloneJson(child.data));
         link.loaded = true;
-        this.persist();
+        await this.persist();
         return true;
     }
 
@@ -224,7 +269,7 @@ export class SceneManager {
         if (!link?.loaded) return false;
         await this.unloadSubSceneCallback(childId);
         link.loaded = false;
-        this.persist();
+        await this.persist();
         return true;
     }
 
@@ -246,44 +291,81 @@ export class SceneManager {
     }
 
     persist() {
-        // Large city scenes exceed Chrome localStorage quotas (~5MB).
-        // Only persist a lightweight index (ids/names). Full mesh data stays in memory.
-        if (!this.storage) return false;
-        const lightDocument = {
+        const operation = this._persistQueue.then(async () => {
+            await this.ready;
+            if (this.persistenceMode === 'indexeddb' && this.sceneStore?.supported) {
+                const document = this.buildDocument();
+                try {
+                    await this.sceneStore.set(this.storageKey, document);
+                    return true;
+                } catch (error) {
+                    // Fall back to localStorage only when the DB write is unavailable.
+                    if (!this.storage) throw formatPersistenceError(error);
+                    this.persistenceMode = 'localstorage';
+                }
+            }
+
+            if (!this.storage) {
+                if (this.sceneStore?.supported) {
+                    try {
+                        await this.sceneStore.set(this.storageKey, this.buildDocument());
+                        this.persistenceMode = 'indexeddb';
+                        return true;
+                    } catch (error) {
+                        throw formatPersistenceError(error);
+                    }
+                }
+                return false;
+            }
+
+            const document = this.buildDocument();
+            const serialized = JSON.stringify(document);
+            try {
+                this.storage.setItem(this.storageKey, serialized);
+                return true;
+            } catch (error) {
+                if (this.sceneStore?.supported) {
+                    try {
+                        await this.sceneStore.set(this.storageKey, document);
+                        this.persistenceMode = 'indexeddb';
+                        try { this.storage.removeItem(this.storageKey); } catch {}
+                        return true;
+                    } catch (dbError) {
+                        throw formatPersistenceError(dbError);
+                    }
+                }
+                throw formatPersistenceError(error);
+            }
+        });
+        // Keep the queue alive even when a caller does not await a persistence mutation.
+        this._persistQueue = operation.catch(() => {});
+        return operation;
+    }
+
+    buildDocument() {
+        return {
             version: SCENE_STORAGE_VERSION,
             activeSceneId: this.activeSceneId,
             scenes: [...this.scenes.values()].map(scene => ({
                 id: scene.id,
                 name: scene.name,
-                data: {
-                    format: 'lightweight-3d-scene',
-                    version: 1,
-                    sceneName: scene.name,
-                    sceneAssetId: scene.data?.sceneAssetId || scene.id,
-                    light: scene.data?.light || null,
-                    meshes: [],
-                    textureAssets: [],
-                    assetManifest: { version: 1, assets: [] }
-                },
-                references: scene.references || [],
-                subScenes: scene.subScenes || [],
-                updatedAt: scene.updatedAt,
-                storageSkipped: true
+                data: scene.data,
+                references: scene.references,
+                subScenes: scene.subScenes,
+                updatedAt: scene.updatedAt
             }))
         };
-        try {
-            // Free any previous oversized value first
-            try { this.storage.removeItem(this.storageKey); } catch (_) { /* ignore */ }
-            this.storage.setItem(this.storageKey, JSON.stringify(lightDocument));
-            return true;
-        } catch (error) {
-            console.warn('Browser storage quota exceeded; scene kept in memory only.', error);
-            try { this.storage.removeItem(this.storageKey); } catch (_) { /* ignore */ }
-            return false;
-        }
     }
 }
 
+function isValidSceneDocument(document) {
+    return document?.version === SCENE_STORAGE_VERSION && Array.isArray(document.scenes);
+}
+
+function formatPersistenceError(error) {
+    const message = error?.message || String(error || 'Unknown storage error');
+    return new Error(`Could not persist scenes: ${message}. Large scenes are stored in IndexedDB automatically when the browser supports it.`);
+}
 
 function duplicateSceneAssetIds(data) {
     const manifest = data.assetManifest;
@@ -337,6 +419,18 @@ function createId(type) {
 }
 
 function cloneJson(value) {
+    if (value === undefined) return undefined;
+    // Engine observation uses Proxy-wrapped arrays/objects. Browser structuredClone
+    // deliberately rejects Proxy values, so always fall back to a JSON clone when
+    // a proxy (or another non-cloneable JSON-compatible value) reaches this boundary.
+    // Scene/asset documents are JSON data by contract, making this fallback safe.
+    if (typeof structuredClone === 'function') {
+        try {
+            return structuredClone(value);
+        } catch {
+            // Fall through to the JSON-safe clone below.
+        }
+    }
     return JSON.parse(JSON.stringify(value));
 }
 

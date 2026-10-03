@@ -186,6 +186,10 @@ function createId(type) {
 }
 
 function cloneJson(value) {
+    if (value === undefined) return undefined;
+    if (typeof structuredClone === 'function') {
+        try { return structuredClone(value); } catch {}
+    }
     return JSON.parse(JSON.stringify(value));
 }
 

@@ -52,5 +52,3 @@ test('shortcuts remain native while editing text and delete can be canceled', ()
     assert.equal(dispatchEditorShortcut(keyEvent('x'), { confirmDelete: () => false, onDelete() { called = true; } }), true);
     assert.equal(called, false);
 });
-
-*/
