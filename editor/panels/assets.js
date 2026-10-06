@@ -86,7 +86,7 @@ export function createAssetsPanel(textureLibrary, onImportMesh, onImportTexture,
     importLabel.textContent = 'Import OBJ model / scene';
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.obj,.mtl,.json,model/obj,application/json';
+    input.accept = '.obj,.mtl,model/obj';
     input.style.display = 'none';
     input.multiple = true;
     input.addEventListener('change', () => {

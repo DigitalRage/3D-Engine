@@ -475,7 +475,7 @@ export function createUI(root, options) {
     loadSceneLabel.textContent = 'Import OBJ Scene';
     const loadSceneInput = document.createElement('input');
     loadSceneInput.type = 'file';
-    loadSceneInput.accept = '.obj,.mtl,.json,model/obj,application/json';
+    loadSceneInput.accept = '.obj,.mtl,model/obj';
     loadSceneInput.hidden = true;
     loadSceneInput.multiple = true;
     loadSceneInput.addEventListener('change', () => {

@@ -7,6 +7,8 @@ export class Scene {
         this.geometryRevision = 0;
         this.lightRevision = 0;
         this.renderRevision = 0;
+        this.poseRevision = 0;
+        this.animationListRevision = 0;
         this._bulkMeshMutation = false;
         this._animatedMeshes = [];
         this._animatedRevision = -1;
@@ -84,6 +86,14 @@ export class Scene {
         this.renderRevision++;
     }
 
+    markPoseDirty() {
+        this.poseRevision++;
+    }
+
+    markAnimationListDirty() {
+        this.animationListRevision++;
+    }
+
     move(mesh, index) {
         const currentIndex = this.meshes.indexOf(mesh);
         if (currentIndex < 0) return false;
@@ -95,9 +105,9 @@ export class Scene {
     }
 
     update(dt) {
-        if (this._animatedRevision !== this.renderRevision) {
+        if (this._animatedRevision !== this.animationListRevision) {
             this._animatedMeshes = this.meshes.filter(mesh => mesh.animationPlayer?.playing && mesh.animationPlayer?.clip);
-            this._animatedRevision = this.renderRevision;
+            this._animatedRevision = this.animationListRevision;
         }
         for (const mesh of this._animatedMeshes) mesh.animationPlayer.update(dt);
     }

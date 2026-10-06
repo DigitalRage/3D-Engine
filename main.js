@@ -6,6 +6,7 @@ import { Material } from './engine/material.js';
 import { loadTexture } from './engine/loader.js';
 import { Editor } from './editor/editor.js';
 import { GameRuntime } from './engine/runtime.js';
+import { PlayerCharacter } from './engine/player.js';
 
 const canvas = document.getElementById('viewport');
 const renderer = new Renderer(canvas);
@@ -24,6 +25,7 @@ let fpsWindowStart = lastTime;
 let measuredFrames = 0;
 let measuredWorkMs = 0;
 let savedCamera = null;
+let playerCharacter = null;
 
 async function init() {
     setLoadingProgress(4, 'Starting renderer');
@@ -69,35 +71,31 @@ async function init() {
                 viewMode: camera.viewMode
             };
 
-            // Start near city plaza for exploration
-            camera.position = [-150, 1.7, 18];
-            camera.target = [-150, 1.5, 0];
-            camera.far = 600;
+            // Third-person exploration starts near the city plaza.
+            const spawn = [-150, 0, 18];
+            camera.position = [-150, 3.1, 23];
+            camera.target = [-150, 1.0, 18];
+            camera.far = 700;
 
             runtime = new GameRuntime(renderer, scene, camera, {
                 audio: audioManager,
                 onUpdate: () => {}
             });
-
-            runtime.enableFirstPersonCamera({
-                speed: 8,
-                sprintMultiplier: 1.9,
-                eyeHeight: 1.7,
-                radius: 0.4,
+            playerCharacter = new PlayerCharacter({ spawn });
+            runtime.enableThirdPersonPlayer(playerCharacter, {
+                spawn,
+                moveSpeed: 5.2,
+                sprintMultiplier: 1.8,
+                jumpSpeed: 8.8,
                 gravity: -24,
-                jumpSpeed: 9,
-                mouseSensitivity: 0.0022
-            });
-
-            scene.meshes.forEach(m => {
-                if (m.name?.includes('Cube') || m.name?.includes('Sphere')) {
-                    runtime.physics.addBody(m, { gravity: -12, radius: 0.5 });
-                }
+                radius: 0.34,
+                cameraDistance: 4.6,
+                cameraTargetHeight: 1.0
             });
 
             runtime.play();
             editor.ui?.setStatus?.(
-                'Play mode — WASD walk, arrows look, Space jump, Shift sprint, click lock mouse. Esc exits.'
+                'Play mode — WASD move, Arrow Keys or mouse/right-drag camera, Space jump, Shift sprint, Esc exits.'
             );
             const ui = document.getElementById('ui-root');
             if (ui) {
@@ -106,6 +104,8 @@ async function init() {
             }
         } else {
             runtime?.stop();
+            runtime?.disableThirdPersonPlayer?.();
+            playerCharacter = null;
             runtime = null;
 
             if (savedCamera) {

@@ -100,12 +100,15 @@ export class AnimationPlayer {
         this.time = Math.max(0, Math.min(this.clip?.duration || 0, time));
         this.playing = !!this.clip;
         this.target?._scene?.markRenderDirty?.();
+        this.target?._scene?.markAnimationListDirty?.();
         if (this.playing) this.clip.apply(this.target, this.time);
     }
 
     stop() {
+        if (!this.playing) return;
         this.playing = false;
         this.target?._scene?.markRenderDirty?.();
+        this.target?._scene?.markAnimationListDirty?.();
     }
 
     seek(time) {

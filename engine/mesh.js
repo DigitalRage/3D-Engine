@@ -144,12 +144,16 @@ export class Mesh {
     }
 
     markDirty(...flags) {
+        let renderDirty = false;
         for (const flag of flags) {
             if (!(flag in this.dirtyFlags)) continue;
             this.dirtyFlags[flag] = true;
             if (flag === 'geometry') this.geometryRevision++;
             if (flag === 'skeletonPose') this.skinRevision++;
+            if (flag === 'geometry' || flag === 'uvs' || flag === 'materials' || flag === 'selection') renderDirty = true;
         }
+        if (renderDirty) this._scene?.markRenderDirty?.();
+        if (flags.includes('skeletonPose')) this._scene?.markPoseDirty?.();
     }
 
     consumeDirtyFlags() {
@@ -1118,14 +1122,10 @@ export class Mesh {
     }
 
     getSkinningSignature() {
+        // skinRevision is bumped whenever an animation/bone pose changes, so serializing
+        // the entire bone pose every frame is unnecessary CPU work.
         if (!this.vertexWeights.size) return '';
-        const pose = this.skeleton.bones.map(bone => [
-            bone.name,
-            ...bone.position,
-            ...bone.rotation,
-            ...bone.scale
-        ]);
-        return `${this.geometryRevision}:${this.skinRevision}:${JSON.stringify(pose)}`;
+        return `${this.geometryRevision}:${this.skinRevision}:${this.skeleton?.poseRevision ?? 0}`;
     }
 
     updateSkinningBuffers(gl) {

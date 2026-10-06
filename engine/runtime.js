@@ -26,6 +26,7 @@ export class GameRuntime {
         this.accumulator = 0;
         this._fpsState = null;
         this._pointerLocked = false;
+        this.player = null;
     }
 
     play() {
@@ -73,6 +74,7 @@ export class GameRuntime {
     };
 
     fixedUpdate(dt) {
+        this.player?.prePhysics?.(dt, this.input, this.physics, this);
         this.physics.step(dt);
     }
 
@@ -82,7 +84,37 @@ export class GameRuntime {
         for (const [key, fn] of this.scripts) {
             try { fn(dt, this); } catch (e) { console.warn('Script error', key, e); }
         }
+        this.player?.postPhysics?.(dt, this.input, this.camera, this);
         this.onUpdate?.(dt, this);
+        this.input.endFrame?.();
+    }
+
+
+    enableThirdPersonPlayer(player, options = {}) {
+        if (!player) throw new TypeError('A PlayerCharacter is required');
+        this.removeScript('__flyCamera');
+        this.removeScript('__firstPerson');
+        this.player = player;
+        Object.assign(player, options);
+        if (!this.scene.meshes.includes(player.mesh)) player.addToScene(this.scene, options.spawn || player.spawn);
+        this.physics.rebuildStaticColliders();
+        const existing = this.physics.bodies.get(player.mesh);
+        if (existing) Object.assign(existing, { gravity: options.gravity ?? -24, radius: options.radius ?? 0.34 });
+        else player.setBody(this.physics.addBody(player.mesh, { gravity: options.gravity ?? -24, radius: options.radius ?? 0.34, velocity: [0, 0, 0] }));
+        player.setBody(this.physics.bodies.get(player.mesh));
+        if (options.cameraDistance) player.cameraDistance = options.cameraDistance;
+        if (options.cameraTargetHeight) player.cameraTargetHeight = options.cameraTargetHeight;
+        if (options.moveSpeed) player.moveSpeed = options.moveSpeed;
+        if (options.sprintMultiplier) player.sprintMultiplier = options.sprintMultiplier;
+        if (options.jumpSpeed) player.jumpSpeed = options.jumpSpeed;
+        return player;
+    }
+
+    disableThirdPersonPlayer() {
+        if (!this.player) return;
+        this.physics.removeBody(this.player.mesh);
+        this.player.removeFromScene();
+        this.player = null;
     }
 
     addScript(key, updateFn) {
@@ -326,6 +358,7 @@ export class GameRuntime {
             document.exitPointerLock?.();
         }
         this._pointerLocked = false;
+        this.player = null;
         this._fpsCleanup?.();
         this._fpsCleanup = null;
     }
@@ -351,6 +384,7 @@ class InputManager {
     }
     isDown(code) { return this.keys.has(code); }
     update() {}
+    endFrame() { this.mouseDelta[0] = 0; this.mouseDelta[1] = 0; }
 }
 
 /**
@@ -362,6 +396,8 @@ class SimplePhysics {
         this.scene = scene;
         this.bodies = new Map();
         this.staticColliders = [];
+        this.cellSize = 32;
+        this.staticGrid = new Map();
     }
 
     addBody(mesh, { velocity = [0, 0, 0], gravity = -9.8, radius = 0.5 } = {}) {
@@ -375,12 +411,41 @@ class SimplePhysics {
     /** Build AABB list from all scene meshes (for player collision). */
     rebuildStaticColliders() {
         this.staticColliders = [];
+        this.cellSize = 32;
+        this.staticGrid = new Map();
         for (const mesh of this.scene.meshes) {
+            if (mesh?.runtimeOnly) continue;
             const box = meshWorldAABB(mesh);
             if (!box) continue;
-            // Skip extremely flat decorative strips if desired — keep all for solid city feel
             this.staticColliders.push(box);
+            this._insertCollider(box);
         }
+    }
+
+    _cellCoord(value) { return Math.floor(value / this.cellSize); }
+
+    _insertCollider(box) {
+        const minX = this._cellCoord(box.minX), maxX = this._cellCoord(box.maxX);
+        const minZ = this._cellCoord(box.minZ), maxZ = this._cellCoord(box.maxZ);
+        for (let x = minX; x <= maxX; x++) for (let z = minZ; z <= maxZ; z++) {
+            const key = `${x},${z}`;
+            let list = this.staticGrid.get(key);
+            if (!list) { list = []; this.staticGrid.set(key, list); }
+            list.push(box);
+        }
+    }
+
+    nearbyColliders(x, z, radius = 1) {
+        if (!this.staticGrid.size) return this.staticColliders;
+        const minX = this._cellCoord(x - radius), maxX = this._cellCoord(x + radius);
+        const minZ = this._cellCoord(z - radius), maxZ = this._cellCoord(z + radius);
+        const seen = new Set();
+        const out = [];
+        for (let cx = minX; cx <= maxX; cx++) for (let cz = minZ; cz <= maxZ; cz++) {
+            const list = this.staticGrid.get(`${cx},${cz}`) || [];
+            for (const box of list) if (!seen.has(box)) { seen.add(box); out.push(box); }
+        }
+        return out;
     }
 
     /**
@@ -390,7 +455,7 @@ class SimplePhysics {
     groundHeight(x, z, radius = 0.3, refY = 2, stepHeight = 0.55) {
         let best = 0; // default infinite ground plane at y=0
         const maxStand = refY + stepHeight;
-        for (const box of this.staticColliders) {
+        for (const box of this.nearbyColliders(x, z, radius + 1)) {
             if (x + radius <= box.minX || x - radius >= box.maxX) continue;
             if (z + radius <= box.minZ || z - radius >= box.maxZ) continue;
             // Only surfaces we can step onto or stand on (not building roofs high above)
@@ -405,7 +470,7 @@ class SimplePhysics {
     collidesCapsule(x, y, z, radius, height) {
         const minY = y;
         const maxY = y + height;
-        for (const box of this.staticColliders) {
+        for (const box of this.nearbyColliders(x, z, radius + 1)) {
             if (x + radius <= box.minX || x - radius >= box.maxX) continue;
             if (z + radius <= box.minZ || z - radius >= box.maxZ) continue;
             if (maxY <= box.minY || minY >= box.maxY) continue;
@@ -426,7 +491,7 @@ class SimplePhysics {
             if (this.staticColliders.length) {
                 const r = body.radius;
                 let grounded = false;
-                for (const box of this.staticColliders) {
+                for (const box of this.nearbyColliders(mesh.position[0], mesh.position[2], r + 1)) {
                     const px = mesh.position[0], py = mesh.position[1], pz = mesh.position[2];
                     if (Math.abs(px - (box.minX + box.maxX) * 0.5) > (box.maxX - box.minX) * 0.5 + r) continue;
                     if (Math.abs(pz - (box.minZ + box.maxZ) * 0.5) > (box.maxZ - box.minZ) * 0.5 + r) continue;
@@ -446,8 +511,8 @@ class SimplePhysics {
                 body.grounded = false;
             }
 
-            for (const other of this.scene.meshes) {
-                if (other === mesh || !this.bodies.has(other)) continue;
+            for (const other of this.bodies.keys()) {
+                if (other === mesh) continue;
                 if (aabbOverlap(mesh, other)) {
                     const dy = (mesh.position[1] - other.position[1]);
                     if (Math.abs(dy) < 1.2) {
@@ -464,19 +529,21 @@ class SimplePhysics {
 
 function meshWorldAABB(mesh) {
     if (!mesh || !mesh.position || !mesh.scale) return null;
+    mesh.refreshBounds?.();
+    const localMin = mesh.boundsMin || [-0.5, -0.5, -0.5];
+    const localMax = mesh.boundsMax || [0.5, 0.5, 0.5];
     const px = mesh.position[0], py = mesh.position[1], pz = mesh.position[2];
-    const sx = Math.abs(mesh.scale[0]) * 0.5;
-    const sy = Math.abs(mesh.scale[1]) * 0.5;
-    const sz = Math.abs(mesh.scale[2]) * 0.5;
-    // Ignore degenerate
-    if (sx < 1e-6 && sy < 1e-6 && sz < 1e-6) return null;
-    return {
-        minX: px - sx, maxX: px + sx,
-        minY: py - sy, maxY: py + sy,
-        minZ: pz - sz, maxZ: pz + sz,
-        mesh
-    };
+    const sx = Math.abs(mesh.scale[0]), sy = Math.abs(mesh.scale[1]), sz = Math.abs(mesh.scale[2]);
+    const minX = Math.min(localMin[0] * sx, localMax[0] * sx) + px;
+    const maxX = Math.max(localMin[0] * sx, localMax[0] * sx) + px;
+    const minY = Math.min(localMin[1] * sy, localMax[1] * sy) + py;
+    const maxY = Math.max(localMin[1] * sy, localMax[1] * sy) + py;
+    const minZ = Math.min(localMin[2] * sz, localMax[2] * sz) + pz;
+    const maxZ = Math.max(localMin[2] * sz, localMax[2] * sz) + pz;
+    if (maxX - minX < 1e-6 && maxY - minY < 1e-6 && maxZ - minZ < 1e-6) return null;
+    return { minX, maxX, minY, maxY, minZ, maxZ, mesh };
 }
+
 
 function aabbOverlap(a, b) {
     const ra = 0.5, rb = 0.5;

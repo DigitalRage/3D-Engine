@@ -1,0 +1,13 @@
+newmtl Player_Black
+Kd 0.008 0.008 0.012
+Ka 0.008 0.008 0.012
+Ks 0 0 0
+Ns 8
+illum 2
+
+newmtl Player_Eyes
+Kd 1 1 1
+Ka 1 1 1
+Ks 0.1 0.1 0.1
+Ns 16
+illum 2

@@ -34,6 +34,9 @@ export class Renderer {
         this._skeletonCache = { revision: -1, meshes: [] };
         this._lastCullState = null;
         this._identity = identityMatrix();
+        this._glStateReady = false;
+        this._lastPresentedKey = null;
+        this._lastLightRevision = -1;
         this.ready = this.initProgram();
     }
 
@@ -78,6 +81,13 @@ export class Renderer {
             aInstanceColor: gl.getAttribLocation(prog, 'aInstanceColor')
         };
         gl.useProgram(this.program);
+        gl.clearColor(0.1, 0.1, 0.15, 1.0);
+        gl.enable(gl.DEPTH_TEST);
+        gl.depthFunc(gl.LESS);
+        gl.frontFace(gl.CCW);
+        gl.depthMask(true);
+        gl.disable(gl.BLEND);
+        this._glStateReady = true;
         if (this.uniforms.aInstanceColor >= 0) {
             gl.disableVertexAttribArray(this.uniforms.aInstanceColor);
             gl.vertexAttrib4f(this.uniforms.aInstanceColor, 1, 1, 1, 1);
@@ -118,21 +128,21 @@ export class Renderer {
         const proj = camera.getProjectionMatrix(this.canvas.width / this.canvas.height);
         const cameraKey = makeCameraKey(camera, this.canvas.width, this.canvas.height);
         const planKey = `${scene.renderRevision}|${cameraKey}|${this.renderMode}`;
+        const presentKey = `${scene.renderRevision}|${scene.poseRevision || 0}|${cameraKey}|${this.renderMode}`;
+        if (this._lastPresentedKey === presentKey && this.renderMode !== 'wireframe') {
+            return;
+        }
         let plan = this._renderPlanCache?.key === planKey ? this._renderPlanCache.plan : null;
         const light = scene.light;
 
-        gl.clearColor(0.1, 0.1, 0.15, 1.0);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-        gl.enable(gl.DEPTH_TEST);
-        gl.depthFunc(gl.LESS);
-        gl.frontFace(gl.CCW);
         gl.useProgram(this.program);
         const frameId = ++this.frameId;
         this._lastCullState = null;
         const stats = { drawCalls: 0, triangles: 0, objects: 0 };
         gl.uniformMatrix4fv(this.uniforms.uView, false, view);
         gl.uniformMatrix4fv(this.uniforms.uProj, false, proj);
-        if (light) {
+        if (light && this._lastLightRevision !== scene.lightRevision) {
             const lightLength = Math.hypot(...light.direction);
             const lx = lightLength > 1e-8 ? light.direction[0] / lightLength : 0;
             const ly = lightLength > 1e-8 ? light.direction[1] / lightLength : -1;
@@ -142,6 +152,7 @@ export class Renderer {
             gl.uniform1f(this.uniforms.uLightIntensity, light.intensity);
             gl.uniform1f(this.uniforms.uLightThreshold, light.threshold);
             gl.uniform3fv(this.uniforms.uShadeColor, light.shadeColor);
+            this._lastLightRevision = scene.lightRevision;
         }
 
         const meshCount = scene.meshes.length;
@@ -239,6 +250,7 @@ export class Renderer {
             gl.disable(gl.CULL_FACE);
             for (const mesh of scene.meshes) mesh.draw(gl, this.program, null, frameId, this.renderMode, stats);
             this.frameStats = stats;
+            this._lastPresentedKey = presentKey;
             return;
         }
         gl.depthMask(true);
@@ -261,6 +273,7 @@ export class Renderer {
         }
         this.drawSkeletons(scene, stats);
         this.frameStats = stats;
+        this._lastPresentedKey = presentKey;
     }
 
     setBackfaceCullingCached(material) {

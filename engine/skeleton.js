@@ -3,25 +3,50 @@ export class Bone {
         this.name = name;
         this.parent = parent;
         this.children = [];
-        this.position = [0, 0, 0];
-        this.rotation = [0, 0, 0];
-        this.scale = [1, 1, 1];
+        this._skeleton = null;
+        this._position = observePoseArray([0, 0, 0], () => this._skeleton?.markPoseChanged?.());
+        this._rotation = observePoseArray([0, 0, 0], () => this._skeleton?.markPoseChanged?.());
+        this._scale = observePoseArray([1, 1, 1], () => this._skeleton?.markPoseChanged?.());
         this.length = 0.5;
         this.bindPosition = [...this.position];
         this.bindRotation = [...this.rotation];
         this.bindScale = [...this.scale];
         if (parent) parent.children.push(this);
     }
+
+    get position() { return this._position; }
+    set position(value) {
+        this._position = observePoseArray(value, () => this._skeleton?.markPoseChanged?.());
+        this._skeleton?.markPoseChanged?.();
+    }
+
+    get rotation() { return this._rotation; }
+    set rotation(value) {
+        this._rotation = observePoseArray(value, () => this._skeleton?.markPoseChanged?.());
+        this._skeleton?.markPoseChanged?.();
+    }
+
+    get scale() { return this._scale; }
+    set scale(value) {
+        this._scale = observePoseArray(value, () => this._skeleton?.markPoseChanged?.());
+        this._skeleton?.markPoseChanged?.();
+    }
 }
 
 export class Skeleton {
     constructor() {
         this.bones = [];
+        this.poseRevision = 0;
+    }
+
+    markPoseChanged() {
+        this.poseRevision++;
     }
 
     addBone(name = `Bone ${this.bones.length + 1}`, parent = null) {
         if (this.find(name)) name = `${name} ${this.bones.length + 1}`;
         const bone = new Bone(name, parent);
+        bone._skeleton = this;
         if (parent) bone.position = [0, parent.length, 0];
         bone.bindPosition = [...bone.position];
         bone.bindScale = [...bone.scale];
@@ -43,6 +68,8 @@ export class Skeleton {
         collect(bone);
         if (bone.parent) bone.parent.children = bone.parent.children.filter(child => child !== bone);
         this.bones = this.bones.filter(current => !removed.has(current));
+        for (const current of removed) current._skeleton = null;
+        this.markPoseChanged();
         return [...removed];
     }
 
@@ -98,4 +125,16 @@ function scale3(vector, scale) {
 
 function multiply3(a, b) {
     return a.map((value, index) => value * b[index]);
+}
+
+function observePoseArray(value, onChange) {
+    const array = Array.isArray(value) ? [...value] : [0, 0, 0];
+    return new Proxy(array, {
+        set(target, property, next) {
+            const old = target[property];
+            target[property] = next;
+            if (property !== 'length' && old !== next) onChange();
+            return true;
+        }
+    });
 }
