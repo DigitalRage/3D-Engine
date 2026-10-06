@@ -1,4 +1,4 @@
-import { createDefaultAudioSceneConfig, normalizeAudioSceneConfig } from '../../engine/audio.js';
+import { createDefaultAudioSceneConfig, normalizeAudioSceneConfig } from '../../engine/audioConfig.js';
 
 export function createAudioPanel(scene, audioManager, onHistory = () => {}) {
     const panel = document.createElement('div');

@@ -4,7 +4,8 @@ import {
     createDefaultAudioSceneConfig,
     normalizeAudioAction,
     normalizeAudioManifest,
-    normalizeAudioSceneConfig
+    normalizeAudioSceneConfig,
+    shouldUseDirectMediaPlayback
 } from '../engine/audio.js';
 
 test('audio manifest keeps only valid OGG entries and generates stable IDs', () => {
@@ -62,4 +63,36 @@ test('the packaged song id is stable and playable by manifest path', () => {
     ] });
     assert.equal(manifest.assets[0].id, 'hic-svnt-leones-loop');
     assert.equal(manifest.assets[0].path, 'Hic Svnt Leones Loop.ogg');
+});
+
+
+test('packaged file:// audio uses direct media playback fallback', () => {
+    assert.equal(shouldUseDirectMediaPlayback('file:///engine/assets/sound/theme.ogg', 'file:///engine/index.html'), true);
+    assert.equal(shouldUseDirectMediaPlayback('./assets/sound/theme.ogg', 'http://localhost:8080/index.html'), false);
+    assert.equal(shouldUseDirectMediaPlayback('blob:http://localhost:8080/test', 'http://localhost:8080/index.html'), false);
+});
+
+test('packaged built-in audio resolves to embedded data media on file pages', async () => {
+    const source = await import('../engine/audio.js');
+    const manifest = source.normalizeAudioManifest({ version: 1, assets: [
+        { id: 'hic', name: 'Hic Svnt Leones Loop', path: 'Hic Svnt Leones Loop.ogg', builtin: true }
+    ]});
+    assert.equal(manifest.assets[0].builtin, true);
+    assert.equal(source.shouldUseDirectMediaPlayback('data:audio/ogg;base64,AAAA'), true);
+    assert.equal(source.shouldUseDirectMediaPlayback('blob:https://example.test/audio'), false);
+});
+
+test('built-in audio resolver returns embedded OGG data independent of page protocol', async () => {
+    const { AudioManager } = await import('../engine/audio.js');
+    const originalDocument = globalThis.document;
+    globalThis.document = { baseURI: 'https://example.test/' };
+    try {
+        const manager = Object.create(AudioManager.prototype);
+        manager.baseUrl = './assets/sound/';
+        const resolved = manager.resolveUrl({ builtin: true, path: 'Hic Svnt Leones Loop.ogg' });
+        assert.equal(resolved.startsWith('data:audio/ogg;base64,'), true);
+        assert.ok(resolved.length > 3000000);
+    } finally {
+        globalThis.document = originalDocument;
+    }
 });

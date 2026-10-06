@@ -21,7 +21,8 @@ export class Gizmos {
         this.axisConstraint = null;
         this.modifierSelection = false;
         this.hoveredAxis = null;
-        this.distance = Math.hypot(...camera.position);
+        this.getSelection = callbacks.getSelection || (() => ({}));
+        this.distance = Math.max(1, Math.hypot(...camera.position.map((value, axis) => value - camera.target[axis])));
         this.yaw = Math.atan2(camera.position[0], camera.position[2]);
         this.pitch = Math.asin(camera.position[1] / this.distance);
         this.bindEvents();
@@ -60,7 +61,10 @@ export class Gizmos {
                 const activeHandle = Number.isInteger(lockedAxis) ? { ...handle, axis: lockedAxis } : handle;
                 this.transformDrag = this.beginTransformDrag(activeHandle, event.clientX, event.clientY);
                 this.activePick = null;
-                this.historySnapshot = this.callbacks.onHistoryStart?.();
+                this.historySnapshot = this.callbacks.onHistoryStart?.({
+                    kind: 'object-transform',
+                    meshes: this.transformDrag.meshes
+                });
                 this.canvas.setPointerCapture(event.pointerId);
                 event.preventDefault();
                 return;
@@ -70,7 +74,14 @@ export class Gizmos {
                 ? this.pick(event.clientX, event.clientY, { additive: this.modifierSelection })
                 : null;
             this.historySnapshot = this.activePick && !this.modifierSelection && this.transformTool === 'select'
-                ? this.callbacks.onHistoryStart?.()
+                ? this.callbacks.onHistoryStart?.({
+                    kind: 'component-transform',
+                    mesh: this.activePick.mesh,
+                    mode: this.pickMode,
+                    pickedFaceIndex: this.activePick.faceIndex,
+                    pickedVertexIndex: this.activePick.vertexIndex,
+                    selection: this.getSelection()
+                })
                 : null;
             this.canvas.setPointerCapture(event.pointerId);
         });
@@ -107,8 +118,11 @@ export class Gizmos {
         this.canvas.addEventListener('pointerup', event => {
             this.dragging = false;
             if (this.canvas.hasPointerCapture(event.pointerId)) this.canvas.releasePointerCapture(event.pointerId);
-            if (this.historySnapshot) this.callbacks.onHistoryEnd?.(this.historySnapshot);
-            if (this.transformDrag) this.callbacks.onTransform?.(this.transformDrag.mesh);
+            if (this.historySnapshot && this.moved) this.callbacks.onHistoryEnd?.(this.historySnapshot);
+            if (this.transformDrag) {
+                const targets = this.transformDrag.meshes || [this.transformDrag.mesh];
+                this.callbacks.onTransform?.(targets.length > 1 ? targets : targets[0]);
+            }
             this.historySnapshot = null;
             this.activePick = null;
             this.transformDrag = null;
@@ -170,6 +184,7 @@ export class Gizmos {
     }
 
     getGizmoWorldLength() {
+        this.distance = Math.max(1, Math.hypot(...this.camera.position.map((value, axis) => value - this.camera.target[axis])));
         const worldPerPixel = this.camera.viewMode === 'perspective'
             ? 2 * this.distance * Math.tan(this.camera.fov / 2) / Math.max(1, this.canvas.height)
             : this.camera.orthographicHeight / Math.max(1, this.canvas.height);
@@ -232,7 +247,14 @@ export class Gizmos {
         return closest;
     }
 
-    drawTransformGizmo() {
+    drawTransformGizmo(force = false) {
+        const cp = this.camera.position, ct = this.camera.target;
+        const selected = this.getSelection?.()?.meshes || [];
+        let selectionKey = '';
+        for (const mesh of selected) selectionKey += `${mesh.assetId || mesh.name}:${mesh.transformRevision || 0};`;
+        const signature = `${cp[0].toFixed(4)},${cp[1].toFixed(4)},${cp[2].toFixed(4)}|${ct[0].toFixed(4)},${ct[1].toFixed(4)},${ct[2].toFixed(4)}|${this.transformTool}|${this.pickMode}|${this.hoveredAxis ?? ''}|${this.axisConstraint ?? ''}|${selectionKey}|${this.canvas.width}x${this.canvas.height}`;
+        if (!force && signature === this._gizmoDrawSignature) return;
+        this._gizmoDrawSignature = signature;
         const context = this.overlayContext;
         if (!context || !this.overlay) return;
         context.clearRect(0, 0, this.overlay.width, this.overlay.height);
@@ -290,8 +312,17 @@ export class Gizmos {
             basePosition: [...mesh.position],
             baseRotation: [...mesh.rotation],
             baseRotationMatrix: getRotationMatrix(mesh.rotation),
-            baseScale: [...mesh.scale]
+            baseScale: [...mesh.scale],
+            meshes: [...new Set(this.getSelection().meshes || [mesh])],
+            basePositions: new Map(),
+            baseRotations: new Map(),
+            baseScales: new Map()
         };
+        for (const target of drag.meshes) {
+            drag.basePositions.set(target, [...target.position]);
+            drag.baseRotations.set(target, [...target.rotation]);
+            drag.baseScales.set(target, [...target.scale]);
+        }
         drag.startAngle = this.getPointerAngle(clientX, clientY, mesh);
         return drag;
     }
@@ -337,7 +368,12 @@ export class Gizmos {
                     next.forEach((_, axis) => { next[axis] = drag.basePosition[axis] + axisData.axis[axis] * amount; });
                 }
             }
-            drag.mesh.position = next;
+            for (const target of drag.meshes) {
+                const base = drag.basePositions.get(target) || drag.basePosition;
+                target.position = base.map((value, axis) => value + axisData.axis[axis] * amount);
+                target.transformRevision = (target.transformRevision || 0) + 1;
+                target._modelMatrixCacheRevision = -1;
+            }
         } else if (drag.tool === 'rotate') {
             let angle = normalizeAngle(this.getPointerAngle(clientX, clientY, drag.mesh) - drag.startAngle);
             if (this.snap.rotation) {
@@ -350,45 +386,76 @@ export class Gizmos {
             const rotation = this.transformSpace === 'local'
                 ? multiplyRotationMatrices(drag.baseRotationMatrix, delta)
                 : multiplyRotationMatrices(delta, drag.baseRotationMatrix);
-            drag.mesh.rotation = rotationMatrixToEuler(rotation);
+            for (const target of drag.meshes) {
+                const targetBase = drag.baseRotations.get(target) || drag.baseRotation;
+                const targetMatrix = getRotationMatrix(targetBase);
+                const targetRotation = this.transformSpace === 'local'
+                    ? multiplyRotationMatrices(targetMatrix, delta)
+                    : multiplyRotationMatrices(delta, targetMatrix);
+                target.rotation = rotationMatrixToEuler(targetRotation);
+                target.transformRevision = (target.transformRevision || 0) + 1;
+                target._modelMatrixCacheRevision = -1;
+            }
         } else if (drag.tool === 'scale') {
             let value = drag.baseScale[drag.axis] + screenAmount / Math.max(60, axisData.screenLength);
             if (this.snap.scale) {
                 const step = Math.max(0.001, Number(this.snap.scaleStep) || 0.1);
                 value = Math.round(value / step) * step;
             }
-            drag.mesh.scale[drag.axis] = Math.max(0.01, value);
+            for (const target of drag.meshes) {
+                const baseScale = drag.baseScales.get(target) || drag.baseScale;
+                target.scale[drag.axis] = Math.max(0.01, baseScale[drag.axis] + (value - drag.baseScale[drag.axis]));
+                target.transformRevision = (target.transformRevision || 0) + 1;
+                target._modelMatrixCacheRevision = -1;
+            }
         }
-        this.callbacks.onTransformPreview?.(drag.mesh);
+        this.callbacks.onTransformPreview?.(drag.meshes.length > 1 ? drag.meshes : drag.mesh);
         this.drawTransformGizmo();
     }
 
     dragSelection(deltaX, deltaY) {
         const pick = this.activePick;
+        if (!pick) return;
         const worldDelta = this.getDragDelta(deltaX, deltaY);
+        const selection = this.getSelection();
         if (this.pickMode === 'mesh') {
-            for (let axis = 0; axis < 3; axis++) pick.mesh.position[axis] += worldDelta[axis];
+            const targets = [...new Set(selection.meshes || [pick.mesh])];
+            for (const mesh of targets) {
+                mesh.position[0] += worldDelta[0];
+                mesh.position[1] += worldDelta[1];
+                mesh.position[2] += worldDelta[2];
+                mesh.transformRevision = (mesh.transformRevision || 0) + 1;
+                mesh._modelMatrixCacheRevision = -1;
+            }
             return;
         }
-        const localDelta = transformDirectionInverse(pick.mesh.getModelMatrix(), worldDelta);
+        const mesh = pick.mesh;
+        const localDelta = transformDirectionInverse(mesh.getModelMatrix(), worldDelta);
+        let sharedIndices = [];
         if (this.pickMode === 'vertex') {
-            const position = [...pick.vertexPosition];
-            for (let axis = 0; axis < 3; axis++) position[axis] += localDelta[axis];
-            pick.mesh.setFaceVertex(pick.faceIndex, pick.vertexIndex, position);
-            pick.vertexPosition = position;
-            return;
+            sharedIndices = [...new Set(selection.vertices?.size ? selection.vertices : [pick.vertexIndex ?? mesh.faces[pick.faceIndex]?.[pick.vertexIndex]])];
+        } else if (this.pickMode === 'edge') {
+            const edgeSet = selection.edges?.size ? selection.edges : new Set([`${pick.a},${pick.b}`]);
+            const indices = new Set();
+            for (const key of edgeSet) {
+                const [a, b] = String(key).split(',').map(Number);
+                if (Number.isInteger(a)) indices.add(a);
+                if (Number.isInteger(b)) indices.add(b);
+            }
+            sharedIndices = [...indices];
+        } else {
+            const faceSet = selection.faces?.size ? selection.faces : new Set([pick.faceIndex]);
+            const indices = new Set();
+            for (const faceIndex of faceSet) {
+                for (const index of mesh.faces[faceIndex] || []) indices.add(index);
+            }
+            sharedIndices = [...indices];
         }
-        const vertices = this.pickMode === 'edge'
-            ? [pick.mesh.positions[pick.a], pick.mesh.positions[pick.b]]
-            : pick.mesh.polygons[pick.faceIndex];
-        vertices.forEach(vertex => {
-            for (let axis = 0; axis < 3; axis++) vertex[axis] += localDelta[axis];
-            pick.mesh.updateBindVertex(vertex);
-        });
-        pick.mesh.rebuildRenderData();
+        if (sharedIndices.length) mesh.translateVertices(sharedIndices, localDelta);
     }
 
     getDragDelta(deltaX, deltaY) {
+        this.distance = Math.max(1, Math.hypot(...this.camera.position.map((value, axis) => value - this.camera.target[axis])));
         if (this.axisConstraint) {
             const axisIndex = { x: 0, y: 1, z: 2 }[this.axisConstraint];
             const axis = [0, 0, 0];
@@ -400,7 +467,7 @@ export class Gizmos {
             const screenLengthSquared = screenAxis[0] ** 2 + screenAxis[1] ** 2;
             if (screenLengthSquared < 1e-6) return [0, 0, 0];
             const amount = (deltaX * screenAxis[0] + deltaY * screenAxis[1]) / screenLengthSquared;
-            return axis.map(value => value * amount);
+            return axis.map(value => value * amount * this.axisSensitivity);
         }
 
         const forward = normalize(this.camera.target.map((value, index) => value - this.camera.position[index]));
@@ -410,7 +477,7 @@ export class Gizmos {
         const amount = this.camera.viewMode === 'perspective'
             ? 2 * this.distance * Math.tan(this.camera.fov / 2) / Math.max(1, rect.height)
             : this.camera.orthographicHeight / Math.max(1, rect.height);
-        return right.map((value, index) => (value * deltaX - up[index] * deltaY) * amount);
+        return right.map((value, index) => (value * deltaX - up[index] * deltaY) * amount * this.moveSensitivity);
     }
 
     projectWorld(point) {
@@ -427,11 +494,37 @@ export class Gizmos {
         const y = 1 - ((clientY - rect.top) / rect.height) * 2;
         const ray = this.createRay(x, y);
         let hit = null;
+
+        // Object picking never needs polygon traversal. Use cached world bounds and
+        // immediately choose the closest intersected object. This makes selecting
+        // objects in large scenes effectively O(mesh count), rather than O(faces).
+        if (this.pickMode === 'mesh') {
+            for (const mesh of this.scene.meshes) {
+                if (mesh._boundsDirty) mesh.refreshBounds?.();
+                const model = mesh.getModelMatrix();
+                if (!mesh.boundsMin || !mesh.boundsMax) continue;
+                const worldBounds = getWorldBounds(mesh.boundsMin, mesh.boundsMax, model);
+                const distance = rayBoundsEntryDistance(ray.origin, ray.direction, worldBounds.min, worldBounds.max, hit?.distance ?? Infinity);
+                if (distance !== null) {
+                    if (!hit || distance < hit.distance) hit = { mesh, distance };
+                }
+            }
+            if (!hit) {
+                this.callbacks.onPickEmpty?.(modifiers);
+                return null;
+            }
+            this.callbacks.onPickMesh?.(hit.mesh, modifiers);
+            return hit;
+        }
+
         for (const mesh of this.scene.meshes) {
+            mesh.ensureEditorTopology?.();
             const model = mesh.getModelMatrix();
+            if (!mesh.vertexWeights.size && mesh._boundsDirty) mesh.refreshBounds?.();
             if (!mesh.vertexWeights.size && mesh.boundsMin && mesh.boundsMax) {
                 const worldBounds = getWorldBounds(mesh.boundsMin, mesh.boundsMax, model);
-                if (!rayIntersectsBounds(ray.origin, ray.direction, worldBounds.min, worldBounds.max, hit?.distance ?? Infinity)) continue;
+                const distance = rayIntersectsBounds(ray.origin, ray.direction, worldBounds.min, worldBounds.max, hit?.distance ?? Infinity);
+                if (distance === null || distance === false) continue;
             }
             const deformedVertices = new Map();
             mesh.polygons.forEach((polygon, faceIndex) => {
@@ -442,20 +535,13 @@ export class Gizmos {
                 });
                 for (let index = 1; index < worldVertices.length - 1; index++) {
                     const distance = intersectRayTriangle(ray.origin, ray.direction, worldVertices[0], worldVertices[index], worldVertices[index + 1]);
-                    if (distance !== null && (hit === null || distance < hit.distance)) {
-                        hit = { mesh, faceIndex, distance };
-                    }
+                    if (distance !== null && (hit === null || distance < hit.distance)) hit = { mesh, faceIndex, distance };
                 }
             });
         }
         if (!hit) {
             this.callbacks.onPickEmpty?.(modifiers);
             return null;
-        }
-
-        if (this.pickMode === 'mesh') {
-            this.callbacks.onPickMesh?.(hit.mesh, modifiers);
-            return hit;
         }
 
         if (this.pickMode === 'vertex') {
@@ -683,6 +769,25 @@ function getWorldBounds(minimum, maximum, model) {
         });
     }
     return { min, max };
+}
+
+function rayBoundsEntryDistance(origin, direction, minimum, maximum, maxDistance = Infinity) {
+    let near = 0;
+    let far = maxDistance;
+    for (let axis = 0; axis < 3; axis++) {
+        const component = direction[axis];
+        if (Math.abs(component) < 1e-10) {
+            if (origin[axis] < minimum[axis] || origin[axis] > maximum[axis]) return null;
+            continue;
+        }
+        const first = (minimum[axis] - origin[axis]) / component;
+        const second = (maximum[axis] - origin[axis]) / component;
+        near = Math.max(near, Math.min(first, second));
+        far = Math.min(far, Math.max(first, second));
+        if (far < near) return null;
+    }
+    if (far < 0 || near > maxDistance) return null;
+    return Math.max(0, near);
 }
 
 function rayIntersectsBounds(origin, direction, minimum, maximum, maxDistance) {

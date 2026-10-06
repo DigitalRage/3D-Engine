@@ -83,12 +83,19 @@ export function createAssetsPanel(textureLibrary, onImportMesh, onImportTexture,
 
     const importLabel = document.createElement('label');
     importLabel.className = 'editor-button';
-    importLabel.textContent = 'Import exported scene or mesh';
+    importLabel.textContent = 'Import OBJ model / scene';
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.json,application/json';
+    input.accept = '.obj,.mtl,.json,model/obj,application/json';
     input.style.display = 'none';
-    input.addEventListener('change', () => input.files[0] && onImportMesh(input.files[0]));
+    input.multiple = true;
+    input.addEventListener('change', () => {
+        const files = [...(input.files || [])];
+        const file = files.find(candidate => candidate.name.toLowerCase().endsWith('.obj')) || files[0];
+        const companions = files.filter(candidate => candidate !== file);
+        if (file) onImportMesh(file, companions);
+        input.value = '';
+    });
     importLabel.appendChild(input);
     panel.appendChild(importLabel);
 

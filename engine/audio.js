@@ -1,121 +1,6 @@
-/**
- * OGG-first audio system for the editor and runtime.
- *
- * Features:
- * - Manifest-backed sounds from ./assets/sound/index.json
- * - Lazy Web Audio initialization (autoplay-policy friendly)
- * - Master + music/sfx/ui/voice buses with independent volume/mute
- * - Music playback with looping, queueing, and crossfades
- * - One-shot playback with polyphony limits and cooldowns
- * - Action/event cues: overlap, queue, or replace behavior
- * - 2D panning and optional 3D spatial audio
- * - Playback handles with pause/resume/seek/stop/fade controls
- * - Scene configuration that serializes cleanly to scene JSON
- */
-
-export const AUDIO_MANIFEST_VERSION = 1;
-export const AUDIO_SCENE_VERSION = 1;
-export const AUDIO_BUSES = ['music', 'sfx', 'ui', 'voice'];
-
-export function createDefaultAudioSceneConfig() {
-    return {
-        version: AUDIO_SCENE_VERSION,
-        masterVolume: 1,
-        masterMuted: false,
-        buses: {
-            music: { volume: 0.75, muted: false },
-            sfx: { volume: 1, muted: false },
-            ui: { volume: 0.8, muted: false },
-            voice: { volume: 1, muted: false }
-        },
-        music: {
-            soundId: null,
-            autoplay: true,
-            loop: true,
-            volume: 1,
-            crossfade: 0.65,
-            playbackRate: 1
-        },
-        actions: []
-    };
-}
-
-export function normalizeAudioSceneConfig(input = {}) {
-    const defaults = createDefaultAudioSceneConfig();
-    const source = input && typeof input === 'object' ? input : {};
-    const buses = source.buses && typeof source.buses === 'object' ? source.buses : {};
-    const music = source.music && typeof source.music === 'object' ? source.music : {};
-    return {
-        version: AUDIO_SCENE_VERSION,
-        masterVolume: clamp01(source.masterVolume ?? defaults.masterVolume),
-        masterMuted: !!(source.masterMuted ?? defaults.masterMuted),
-        buses: Object.fromEntries(AUDIO_BUSES.map(bus => [bus, {
-            volume: clamp01(buses[bus]?.volume ?? defaults.buses[bus].volume),
-            muted: !!(buses[bus]?.muted ?? defaults.buses[bus].muted)
-        }])),
-        music: {
-            soundId: typeof music.soundId === 'string' && music.soundId ? music.soundId : null,
-            autoplay: music.autoplay !== false,
-            loop: music.loop !== false,
-            volume: clamp01(music.volume ?? defaults.music.volume),
-            crossfade: clampNumber(music.crossfade ?? defaults.music.crossfade, 0, 30),
-            playbackRate: clampNumber(music.playbackRate ?? defaults.music.playbackRate, 0.25, 4)
-        },
-        actions: Array.isArray(source.actions) ? source.actions.map(normalizeAudioAction).filter(Boolean) : []
-    };
-}
-
-export function normalizeAudioAction(action = {}) {
-    if (!action || typeof action !== 'object') return null;
-    const actionName = String(action.action || '').trim();
-    const soundId = String(action.soundId || '').trim();
-    if (!actionName || !soundId) return null;
-    return {
-        id: String(action.id || `cue-${slugify(actionName)}-${slugify(soundId)}`),
-        action: actionName,
-        soundId,
-        bus: AUDIO_BUSES.includes(action.bus) ? action.bus : 'sfx',
-        mode: ['overlap', 'queue', 'replace'].includes(action.mode) ? action.mode : 'overlap',
-        volume: clamp01(action.volume ?? 1),
-        loop: !!action.loop,
-        cooldown: clampNumber(action.cooldown ?? 0, 0, 3600),
-        maxVoices: clampNumber(action.maxVoices ?? 8, 1, 64),
-        playbackRateMin: Math.min(clampNumber(action.playbackRateMin ?? 1, 0.25, 4), clampNumber(action.playbackRateMax ?? 1, 0.25, 4)),
-        playbackRateMax: Math.max(clampNumber(action.playbackRateMin ?? 1, 0.25, 4), clampNumber(action.playbackRateMax ?? 1, 0.25, 4)),
-        spatial: !!action.spatial,
-        position: Array.isArray(action.position) && action.position.length >= 3
-            ? [Number(action.position[0]) || 0, Number(action.position[1]) || 0, Number(action.position[2]) || 0]
-            : null
-    };
-}
-
-export function normalizeAudioManifest(manifest = {}) {
-    const source = manifest && typeof manifest === 'object' ? manifest : {};
-    if (source.version !== undefined && Number(source.version) !== AUDIO_MANIFEST_VERSION) {
-        throw new TypeError(`Unsupported audio manifest version: ${source.version}`);
-    }
-    const assets = Array.isArray(source.assets) ? source.assets : [];
-    const normalized = [];
-    const ids = new Set();
-    for (const entry of assets) {
-        if (!entry || typeof entry !== 'object') continue;
-        const path = String(entry.path || entry.url || '').trim();
-        if (!path || !/\.ogg(?:$|\?)/i.test(path)) continue;
-        const id = String(entry.id || slugify(path.replace(/^.*\//, '').replace(/\.ogg$/i, ''))).trim();
-        if (!id || ids.has(id)) continue;
-        ids.add(id);
-        normalized.push({
-            id,
-            name: String(entry.name || id),
-            path,
-            loopable: entry.loopable !== false,
-            tags: Array.isArray(entry.tags) ? entry.tags.map(tag => String(tag)).filter(Boolean) : [],
-            volume: clamp01(entry.volume ?? 1)
-        });
-    }
-    return { version: AUDIO_MANIFEST_VERSION, assets: normalized };
-}
-
+import { BUILTIN_AUDIO_DATA } from './builtinAudio.js';
+import { AUDIO_MANIFEST_VERSION, AUDIO_SCENE_VERSION, AUDIO_BUSES, shouldUseDirectMediaPlayback, createDefaultAudioSceneConfig, normalizeAudioSceneConfig, normalizeAudioAction, normalizeAudioManifest } from './audioConfig.js';
+export { AUDIO_MANIFEST_VERSION, AUDIO_SCENE_VERSION, AUDIO_BUSES, shouldUseDirectMediaPlayback, createDefaultAudioSceneConfig, normalizeAudioSceneConfig, normalizeAudioAction, normalizeAudioManifest } from './audioConfig.js';
 export class AudioManager {
     constructor({
         manifestUrl = './assets/sound/index.json',
@@ -213,6 +98,15 @@ export class AudioManager {
     resolveUrl(asset) {
         const path = typeof asset === 'string' ? asset : asset?.path;
         if (!path) return null;
+        // Packaged built-in audio gets a data URL on local file:// pages.
+        // Chromium can reject file-backed media in ways that do not affect
+        // imported Blob URLs, so embedding the known packaged asset makes
+        // double-click launches deterministic. HTTP deployments still use
+        // the normal asset path.
+        if (typeof asset === 'object' && asset?.builtin) {
+            const name = path.replace(/^.*[\\/]/, '');
+            return BUILTIN_AUDIO_DATA[name] || path;
+        }
         try {
             return new URL(path, new URL(this.baseUrl, document.baseURI)).href;
         } catch {
@@ -309,14 +203,32 @@ export class AudioManager {
     }
 
     applyBusState() {
-        if (!this.context || !this.masterGain) return;
-        const masterVolume = clamp01(this._masterVolume ?? 1);
-        this.masterGain.gain.setTargetAtTime(this._masterMuted ? 0 : masterVolume, this.context.currentTime, 0.012);
-        for (const [bus, { gain }] of this.buses) {
-            const state = this.getBusState(bus);
-            const value = state.muted ? 0 : state.volume;
-            gain.gain.setTargetAtTime(value, this.context.currentTime, 0.012);
+        if (this.context && this.masterGain) {
+            const masterVolume = clamp01(this._masterVolume ?? 1);
+            this.masterGain.gain.setTargetAtTime(this._masterMuted ? 0 : masterVolume, this.context.currentTime, 0.012);
+            for (const [bus, { gain }] of this.buses) {
+                const state = this.getBusState(bus);
+                const value = state.muted ? 0 : state.volume;
+                gain.gain.setTargetAtTime(value, this.context.currentTime, 0.012);
+            }
         }
+        // file:// media cannot reliably be routed through MediaElementSource
+        // in Chromium. Keep those built-in files audible through the media
+        // element itself, while still honoring the mixer settings.
+        for (const playback of this.playbacks) this.updateDirectPlaybackVolume(playback);
+    }
+
+    getDirectOutputVolume(playback) {
+        if (!playback) return 1;
+        const master = this._masterMuted ? 0 : clamp01(this._masterVolume ?? 1);
+        const bus = this.getBusState(playback.bus || 'sfx');
+        const busVolume = bus.muted ? 0 : clamp01(bus.volume);
+        return clamp01((playback._baseVolume ?? 1) * master * busVolume);
+    }
+
+    updateDirectPlaybackVolume(playback) {
+        if (!playback?.directMedia || !playback.audio) return;
+        playback.audio.volume = this.getDirectOutputVolume(playback);
     }
 
     createPlayback(soundId, options = {}) {
@@ -326,34 +238,61 @@ export class AudioManager {
             const oldest = this.playbacks.values().next().value;
             oldest?.stop({ fade: 0.015 });
         }
-        const context = this.ensureContext();
+
+        const mediaUrl = this.resolveUrl(asset);
+        if (!mediaUrl) throw new Error(`OGG sound has no playable path: ${soundId}`);
+        const busName = AUDIO_BUSES.includes(options.bus) ? options.bus : 'sfx';
+        const baseVolume = clamp01((options.volume ?? 1) * (asset.volume ?? 1));
+        const directMedia = shouldUseDirectMediaPlayback(mediaUrl);
+
         const audio = new Audio();
         audio.preload = 'auto';
-        const mediaUrl = this.resolveUrl(asset);
-        // Do not force CORS mode for local files or same-origin media. Setting
-        // crossOrigin on file:// media can turn a perfectly playable OGG into
-        // a silent media element in Chromium.
-        try {
-            const parsed = new URL(mediaUrl, document.baseURI);
-            const page = new URL(document.baseURI);
-            if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
-                (page.protocol === 'http:' || page.protocol === 'https:') &&
-                parsed.origin !== page.origin) {
-                audio.crossOrigin = 'anonymous';
-            }
-        } catch {}
+        // Do not force CORS mode for local files or same-origin media. In
+        // particular, Chromium may mute a MediaElementSource backed by
+        // file:// media, so those packaged files use direct media playback.
+        if (!directMedia) {
+            try {
+                const parsed = new URL(mediaUrl, document.baseURI);
+                const page = new URL(document.baseURI);
+                if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+                    (page.protocol === 'http:' || page.protocol === 'https:') &&
+                    parsed.origin !== page.origin) {
+                    audio.crossOrigin = 'anonymous';
+                }
+            } catch {}
+        }
         audio.src = mediaUrl;
         audio.load();
         audio.loop = !!options.loop;
         audio.playbackRate = clampNumber(options.playbackRate ?? 1, 0.25, 4);
-        audio.volume = 1;
         if (Number.isFinite(options.startOffset)) audio.currentTime = Math.max(0, options.startOffset);
 
-        const source = context.createMediaElementSource(audio);
-        const busName = AUDIO_BUSES.includes(options.bus) ? options.bus : 'sfx';
+        if (directMedia) {
+            const playback = new AudioPlayback(this, {
+                id: `playback-${++this._playbackId}`,
+                soundId,
+                asset,
+                audio,
+                source: null,
+                gain: null,
+                panner: null,
+                bus: busName,
+                owner: options.owner || 'global',
+                spatial: false,
+                directMedia: true,
+                _baseVolume: baseVolume,
+                fadeOutDefault: Number(options.fadeOut) || 0.08
+            });
+            this.playbacks.add(playback);
+            this.updateDirectPlaybackVolume(playback);
+            playback.onFinished(() => this.playbacks.delete(playback));
+            return playback;
+        }
+
+        const context = this.ensureContext();
         const busGain = this.ensureBus(busName);
         const gain = context.createGain();
-        gain.gain.value = clamp01((options.volume ?? 1) * (asset.volume ?? 1));
+        gain.gain.value = baseVolume;
 
         let tail = gain;
         let panner = null;
@@ -375,6 +314,7 @@ export class AudioManager {
             tail.connect(panner);
             tail = panner;
         }
+        const source = context.createMediaElementSource(audio);
         source.connect(gain);
         tail.connect(busGain);
 
@@ -389,6 +329,8 @@ export class AudioManager {
             bus: busName,
             owner: options.owner || 'global',
             spatial: !!panner,
+            directMedia: false,
+            _baseVolume: baseVolume,
             fadeOutDefault: Number(options.fadeOut) || 0.08
         });
         this.playbacks.add(playback);
@@ -692,10 +634,9 @@ export class AudioPlayback {
             if (this.state !== 'ready' && this.state !== 'paused' && this.state !== 'blocked') return;
             this.state = 'playing';
             this._started = true;
-            // Resume Web Audio when possible, but never wait for it before
-            // asking the media element to play. This preserves user-gesture
-            // activation while still recovering from a suspended context.
-            this.manager.unlock();
+            // Packaged file:// media uses the HTMLMediaElement directly.
+            // Imported blob/http media continues through Web Audio.
+            if (!this.directMedia) this.manager.unlock();
             const promise = this.audio.play();
             if (promise?.catch) promise.catch(error => {
                 this.manager.onError?.(error);
@@ -736,7 +677,7 @@ export class AudioPlayback {
             try { this.audio.currentTime = 0; } catch {}
             this.finish('stopped');
         };
-        if (fade > 0 && this.gain) this.fadeTo(0, fade).then(finish);
+        if (fade > 0 && (this.gain || this.directMedia)) this.fadeTo(0, fade).then(finish);
         else finish();
         return this.done;
     }
@@ -749,8 +690,11 @@ export class AudioPlayback {
     setVolume(volume) {
         const value = clamp01(volume);
         this._baseVolume = value;
-        const now = this.manager.context?.currentTime || 0;
-        this.gain?.gain.setValueAtTime(value, now);
+        if (this.directMedia) this.manager.updateDirectPlaybackVolume(this);
+        else {
+            const now = this.manager.context?.currentTime || 0;
+            this.gain?.gain.setValueAtTime(value, now);
+        }
         return this;
     }
 
@@ -774,9 +718,9 @@ export class AudioPlayback {
     }
 
     async fadeTo(volume, duration = 0.15) {
-        if (!this.gain) return this;
+        if (!this.gain && !this.directMedia) return this;
         const token = ++this._fadeToken;
-        const start = this.gain.gain.value;
+        const start = this._baseVolume ?? this.gain?.gain.value ?? 1;
         const end = clamp01(volume);
         const seconds = Math.max(0, Number(duration) || 0);
         if (!seconds) {
@@ -789,7 +733,10 @@ export class AudioPlayback {
                 if (token !== this._fadeToken || this.state === 'finished' || this.state === 'stopped') return resolve(this);
                 const t = Math.min(1, (performance.now() - started) / (seconds * 1000));
                 const eased = t * t * (3 - 2 * t);
-                this.gain.gain.value = start + (end - start) * eased;
+                const value = start + (end - start) * eased;
+                this._baseVolume = value;
+                if (this.directMedia) this.manager.updateDirectPlaybackVolume(this);
+                else this.gain.gain.value = value;
                 if (t >= 1) return resolve(this);
                 requestAnimationFrame(step);
             };
@@ -836,3 +783,4 @@ function normalize(vector) {
     const length = Math.hypot(...vector) || 1;
     return vector.map(value => value / length);
 }
+

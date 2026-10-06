@@ -99,11 +99,13 @@ export class AnimationPlayer {
         this.clip = clip || this.clip;
         this.time = Math.max(0, Math.min(this.clip?.duration || 0, time));
         this.playing = !!this.clip;
+        this.target?._scene?.markRenderDirty?.();
         if (this.playing) this.clip.apply(this.target, this.time);
     }
 
     stop() {
         this.playing = false;
+        this.target?._scene?.markRenderDirty?.();
     }
 
     seek(time) {

@@ -167,7 +167,7 @@ runtime.play();
 </code></pre>
 
       <h2 id="export">Import / export</h2>
-      <p>Scenes export as JSON (<code>lightweight-3d-scene</code> format) including meshes, materials, skeletons, animations, textures metadata, and scene references. Import via the scene file loader. Mesh JSON (vertices/faces) is also supported.</p>
+      <p>OBJ is the primary geometry exchange format. <strong>Export OBJ + MTL</strong> writes each mesh as its own named <code>o</code> object and bakes its transform into the vertex positions. The companion MTL stores flat diffuse colors, emission, opacity, roughness, and metallic values. <strong>Import OBJ Scene</strong> accepts an OBJ plus an optional MTL; every named OBJ object becomes a separate mesh. Legacy JSON scene files remain supported for engine-specific metadata such as lights, audio, prefabs, and animation data.</p>
 
       <h2 id="troubleshooting">Troubleshooting</h2>
       <table>

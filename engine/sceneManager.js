@@ -58,14 +58,18 @@ export class SceneManager {
         this.hydrate(document);
 
         if (this.sceneStore?.supported) {
-            try {
-                await this.sceneStore.set(this.storageKey, document);
-                this.persistenceMode = 'indexeddb';
-                if (loadedFromLegacyStorage) {
+            if (loadedFromLegacyStorage) {
+                try {
+                    await this.sceneStore.set(this.storageKey, document);
+                    this.persistenceMode = 'indexeddb';
                     try { this.storage?.removeItem(this.storageKey); } catch {}
+                } catch {
+                    this.persistenceMode = 'localstorage';
                 }
-            } catch {
-                this.persistenceMode = 'localstorage';
+            } else {
+                // IndexedDB already returned a structured-cloned document. Do not
+                // rewrite a potentially multi-megabyte scene on every startup.
+                this.persistenceMode = 'indexeddb';
             }
         } else {
             this.persistenceMode = 'localstorage';
@@ -80,7 +84,7 @@ export class SceneManager {
             this.scenes.set(source.id, {
                 id: source.id,
                 name: String(source.name || 'Scene'),
-                data: cloneJson(source.data),
+                data: source.data,
                 references: uniqueStrings(source.references),
                 subScenes: normalizeSubScenes(source.subScenes),
                 updatedAt: Number(source.updatedAt) || 0
@@ -127,7 +131,7 @@ export class SceneManager {
             await this.saveScene(previousSceneId);
             await this.unloadLoadedSubScenes(this.activeScene);
             this.activeSceneId = sceneId;
-            await this.activateScene(cloneJson(scene.data), scene);
+            await this.activateScene(scene.data, scene);
             for (const subScene of scene.subScenes) {
                 if (!subScene.streaming) await this.loadSubScene(scene.id, subScene.sceneId);
             }
@@ -155,11 +159,10 @@ export class SceneManager {
     async initializeActiveScene() {
         const scene = this.activeScene;
         if (!scene) return null;
-        await this.activateScene(cloneJson(scene.data), scene);
+        await this.activateScene(scene.data, scene);
         for (const subScene of scene.subScenes) {
             if (!subScene.streaming) await this.loadSubScene(scene.id, subScene.sceneId);
         }
-        await this.persist();
         return scene;
     }
 
@@ -169,12 +172,11 @@ export class SceneManager {
         if (id === this.activeSceneId) return target;
         if (this.activeSceneId) await this.saveScene(this.activeSceneId);
         await this.unloadLoadedSubScenes(this.activeScene);
-        await this.activateScene(cloneJson(target.data), target);
+        await this.activateScene(target.data, target);
         this.activeSceneId = id;
         for (const subScene of target.subScenes) {
             if (!subScene.streaming && !subScene.loaded) await this.loadSubScene(target.id, subScene.sceneId);
         }
-        await this.persist();
         return target;
     }
 
@@ -257,7 +259,7 @@ export class SceneManager {
         if (!link || !child) throw new Error('The sub-scene relationship does not exist');
         if (parentId !== this.activeSceneId) throw new Error('Only the active scene can stream sub-scenes');
         if (link.loaded) return false;
-        await this.loadSubSceneCallback(child.id, cloneJson(child.data));
+        await this.loadSubSceneCallback(child.id, child.data);
         link.loaded = true;
         await this.persist();
         return true;

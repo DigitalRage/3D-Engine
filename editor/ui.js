@@ -8,7 +8,7 @@ import { DirectionalLight } from '../engine/light.js';
 import { dispatchEditorShortcut } from './shortcuts.js';
 
 export function createUI(root, options) {
-    const { scene, audioManager, onSelect, onSelectFace, onSetPickMode, onAddCube, onAddPlane, onAddSphere, onAddCylinder, onAddBatch, onDuplicate, onAddFace, onExtrudeFace, onMergeFace, onMergeVertices, onAddVertex, onAddBone, onRemoveBone, onCreateAnimation, onKeyPose, onDeleteBoneKeys, onSeekAnimation, onToggleAnimation, onRenameAnimation, onSetAnimationDuration, onImportMesh, onImportTexture, onDelete, onReorderMesh, onResetCamera, onExport, onUndo, onRedo, onHistory = () => {}, onKnifeTool, onBevel, onInset, onLoopCut, onBridge, onFill, onGridFill, onDissolve, onSplit, onSeparate, onTriangulate, onQuadRebuild, onRecalculateNormals, onFlipNormals } = options;
+    const { scene, audioManager, onSelect, onSelectFace, onSetPickMode, onAddCube, onAddPlane, onAddSphere, onAddCylinder, onAddBatch, onDuplicate, onAddFace, onExtrudeFace, onMergeFace, onMergeVertices, onAddVertex, onAddBone, onRemoveBone, onCreateAnimation, onKeyPose, onDeleteBoneKeys, onSeekAnimation, onToggleAnimation, onRenameAnimation, onSetAnimationDuration, onImportMesh, onImportTexture, onDelete, onReorderMesh, onResetCamera, onExport, onExportJSON, onUndo, onRedo, onHistory = () => {}, onKnifeTool, onBevel, onInset, onLoopCut, onBridge, onFill, onGridFill, onDissolve, onSplit, onSeparate, onTriangulate, onQuadRebuild, onRecalculateNormals, onFlipNormals } = options;
     const sceneActions = options.sceneActions || {};
     root.style.pointerEvents = 'none';
     root.innerHTML = '';
@@ -22,15 +22,15 @@ export function createUI(root, options) {
         .polygon-counter { position: fixed; right: 12px; bottom: 44px; z-index: 20; max-width: calc(100vw - 24px); padding: 6px 9px; color: #d7e8fa; background: rgba(15, 23, 34, 0.94); border: 1px solid rgba(130, 165, 202, 0.4); font: 12px/1.3 ui-monospace, monospace; font-variant-numeric: tabular-nums; pointer-events: none; }
         .viewport-stats { position: fixed; left: 12px; bottom: 12px; z-index: 20; padding: 6px 9px; color: #d7e8fa; background: rgba(15, 23, 34, 0.94); border: 1px solid rgba(130, 165, 202, 0.4); font: 12px/1.3 ui-monospace, monospace; font-variant-numeric: tabular-nums; pointer-events: none; }
         .operator-status { position: fixed; left: 12px; bottom: 44px; z-index: 20; max-width: min(50vw, 420px); overflow: hidden; padding: 6px 9px; color: #d7e8fa; background: rgba(15, 23, 34, 0.94); border: 1px solid rgba(130, 165, 202, 0.4); font: 12px/1.3 ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
-        .editor-shell { position: fixed; inset: 0; z-index: 10; display: grid; grid-template-columns: minmax(210px, 17vw) minmax(0, 1fr) minmax(220px, 19vw); grid-template-rows: auto minmax(180px, 1fr) minmax(170px, 24vh); grid-template-areas: 'toolbar toolbar toolbar' 'hierarchy viewport inspector' 'assets audio animation'; box-sizing: border-box; overflow: hidden; pointer-events: none; }
-        .editor-toolbar { grid-area: toolbar; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 5px 8px; background: rgba(16, 20, 25, 0.98); border-bottom: 1px solid #343b43; pointer-events: auto; }
+        .editor-shell { position: fixed; inset: 0; z-index: 10; display: grid; overscroll-behavior: none; grid-template-columns: minmax(210px, 17vw) minmax(0, 1fr) minmax(220px, 19vw); grid-template-rows: auto minmax(180px, 1fr) minmax(170px, 24vh); grid-template-areas: 'toolbar toolbar toolbar' 'hierarchy viewport inspector' 'assets audio animation'; box-sizing: border-box; overflow: hidden; pointer-events: none; }
+        .editor-toolbar { grid-area: toolbar; display: flex; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-gutter: stable; overscroll-behavior-x: contain; align-items: center; flex-wrap: wrap; gap: 5px; padding: 5px 8px; background: rgba(16, 20, 25, 0.98); border-bottom: 1px solid #343b43; pointer-events: auto; }
         .editor-toolbar-head { position: relative; display: flex; align-items: center; gap: 6px; min-height: 26px; }
         .tool-group { min-width: 0; }
         .tool-group summary { padding: 5px 8px; color: #9ed8ff; background: #101722; border: 1px solid #26384d; cursor: pointer; list-style: none; }
         .tool-group summary::-webkit-details-marker { display: none; }
         .tool-group summary::before { content: '+'; display: inline-block; width: 18px; color: #ffd071; }
         .tool-group[open] summary::before { content: '-'; }
-        .tool-group-content { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 0 2px; }
+        .tool-group-content { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 0 2px; max-height: min(42vh, 420px); overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; }
         .scene-controls { display: grid; grid-template-columns: repeat(3, minmax(92px, 1fr)); gap: 5px; width: min(390px, 100%); }
         .scene-controls .scene-wide { grid-column: 1 / -1; }
         .scene-controls .check-row { grid-column: 1 / -1; margin: 0; }
@@ -41,10 +41,12 @@ export function createUI(root, options) {
         .editor-button { border: 1px solid #48515b; background: #292f36; color: #e8edf5; padding: 5px 9px; cursor: pointer; border-radius: 2px; }
         .editor-button:hover { background: #3a424b; }
         .editor-panels { display: contents; }
-        .editor-panel { box-sizing: border-box; width: 100%; min-width: 0; min-height: 0; padding: 10px; overflow: auto; scrollbar-width: thin; scrollbar-color: #59636e #171b20; pointer-events: auto; background: rgba(24, 28, 33, 0.97); }
-        .panel-title { margin: 0 0 8px; color: #9ed8ff; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
-        .hierarchy-list { list-style: none; padding: 0; margin: 0; }
-        .hierarchy-item { display: flex; align-items: center; gap: 4px; padding: 2px; border: 1px solid transparent; }
+        .editor-panel { box-sizing: border-box; width: 100%; min-width: 0; min-height: 0; max-height: 100%; padding: 10px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-width: auto; scrollbar-gutter: stable both-edges; scrollbar-color: #59636e #171b20; contain: layout paint style; pointer-events: auto; background: rgba(24, 28, 33, 0.97); }
+        .panel-title { position: sticky; top: -10px; z-index: 3; padding: 6px 0; margin: 0 0 8px; color: #9ed8ff; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+        .hierarchy-panel { display: flex; flex-direction: column; min-height: 0; }
+        .hierarchy-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; contain: strict; }
+        .hierarchy-list { position: relative; list-style: none; padding: 0; margin: 0; min-height: 0; }
+        .hierarchy-item { position: absolute; left: 0; right: 0; height: 34px; display: flex; align-items: center; gap: 4px; padding: 2px; border: 1px solid transparent; box-sizing: border-box; }
         .hierarchy-item:hover, .hierarchy-item.selected { background: #284a68; border-color: #3b526d; }
         .hierarchy-select { flex: 1; min-width: 0; padding: 5px 7px; border: 0; background: transparent; color: #c8d4e2; text-align: left; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; cursor: pointer; }
         .hierarchy-delete { width: 28px; height: 28px; border: 1px solid #60464a; background: #321f25; color: #ffc2c2; cursor: pointer; }
@@ -53,6 +55,12 @@ export function createUI(root, options) {
         .field-group { margin: 0 0 10px; }
         .field-label { display: block; margin-bottom: 4px; color: #9aa9ba; font-size: 11px; text-transform: uppercase; }
         .vector-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+        .navigator-row { display: grid; grid-template-columns: 32px minmax(64px, 1fr) auto 32px; align-items: center; gap: 5px; margin: 0 0 10px; }
+        .navigator-row button { min-height: 28px; border: 1px solid #3b526d; background: #101722; color: #d7e8fa; cursor: pointer; }
+        .navigator-row button:disabled { opacity: .45; cursor: default; }
+        .navigator-index { text-align: center; }
+        .navigator-count { color: #7f8da0; font: 11px/1 ui-monospace, monospace; white-space: nowrap; }
+        .vertex-editor-fields { margin-bottom: 10px; padding: 7px; border: 1px solid #303b48; background: rgba(10, 15, 22, .45); }
         .editor-input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid #3b526d; background: #101722; color: #e8edf5; padding: 5px; pointer-events: auto; }
         .editor-panel button, .editor-panel label, .editor-panel input, .hierarchy-item { pointer-events: auto; }
         .panel-disclosure { position: relative; z-index: 2; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; color: #e8edf5; background: #181c21; border: 1px solid #343b43; pointer-events: auto; }
@@ -63,7 +71,7 @@ export function createUI(root, options) {
         .panel-disclosure[data-dock='animation'] { grid-area: animation; }
         .panel-disclosure:not([open]) { height: auto !important; }
         .panel-disclosure[open] { min-height: 0; }
-        .panel-disclosure[open] > .editor-panel { flex: 1; }
+        .panel-disclosure[open] > .editor-panel { flex: 1 1 auto; min-height: 0; max-height: calc(100vh - 110px); overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
         .panel-disclosure > summary { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: 0 0 34px; min-height: 34px; box-sizing: border-box; padding: 4px 7px; color: #9ed8ff; background: rgba(16, 22, 32, 0.98); cursor: pointer; pointer-events: auto; list-style: none; }
         .panel-disclosure > summary::-webkit-details-marker { display: none; }
         .panel-disclosure > summary::before { content: '+'; display: inline-block; width: 18px; color: #ffd071; }
@@ -133,7 +141,7 @@ export function createUI(root, options) {
         .uv-canvas:active { cursor: grabbing; }
         .editor-shell.uv-mode .uv-workspace { display: flex; }
         .editor-shell.uv-mode .editor-panels { display: none; }
-        @media (max-width: 760px) { .editor-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(150px, 36vh) minmax(110px, 20vh) minmax(110px, 20vh) minmax(110px, 20vh) minmax(145px, 22vh) minmax(160px, 24vh); grid-template-areas: 'toolbar' 'viewport' 'hierarchy' 'inspector' 'assets' 'audio' 'animation'; overflow: auto; } .editor-toolbar { position: sticky; top: 0; z-index: 5; } .panel-disclosure[data-floating='true'] { max-width: calc(100vw - 16px); } .audio-action-row { grid-template-columns: 1fr 1fr 1fr; } }
+        @media (max-width: 760px) { .editor-shell { scrollbar-gutter: stable; min-height: 0; } grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(150px, 36vh) minmax(110px, 20vh) minmax(110px, 20vh) minmax(110px, 20vh) minmax(145px, 22vh) minmax(160px, 24vh); grid-template-areas: 'toolbar' 'viewport' 'hierarchy' 'inspector' 'assets' 'audio' 'animation'; overflow: auto; } .editor-toolbar { position: sticky; top: 0; z-index: 5; } .panel-disclosure[data-floating='true'] { max-width: calc(100vw - 16px); } .audio-action-row { grid-template-columns: 1fr 1fr 1fr; } }
     `;
     root.appendChild(style);
     const fpsReadout = document.createElement('div');
@@ -154,10 +162,14 @@ export function createUI(root, options) {
     root.appendChild(operatorStatus);
     const editorStatus = { tool: 'select', mode: 'face', space: 'world', snap: {}, last: 'Ready' };
     const labels = { select: 'Select', move: 'Move', rotate: 'Rotate', scale: 'Scale', mesh: 'Object', orbit: 'Orbit', face: 'Face', edge: 'Edge', vertex: 'Vertex' };
+    let lastStatusText = '';
     const refreshStatus = () => {
         const counts = options.getSelectionCounts?.() || {};
         const snapOn = Object.entries(editorStatus.snap).some(([key, value]) => key.endsWith('Step') ? false : !!value);
-        operatorStatus.textContent = `${labels[editorStatus.tool] || editorStatus.tool} | ${labels[editorStatus.mode] || editorStatus.mode} | ${String(editorStatus.space).toUpperCase()} | Snap ${snapOn ? 'On' : 'Off'} | M ${counts.meshes || 0} F ${counts.faces || 0} E ${counts.edges || 0} V ${counts.vertices || 0} | ${editorStatus.last}`;
+        const nextText = `${labels[editorStatus.tool] || editorStatus.tool} | ${labels[editorStatus.mode] || editorStatus.mode} | ${String(editorStatus.space).toUpperCase()} | Snap ${snapOn ? 'On' : 'Off'} | M ${counts.meshes || 0} F ${counts.faces || 0} E ${counts.edges || 0} V ${counts.vertices || 0} | ${editorStatus.last}`;
+        if (nextText === lastStatusText) return;
+        lastStatusText = nextText;
+        operatorStatus.textContent = nextText;
     };
     window.addEventListener('keydown', event => {
         const handled = dispatchEditorShortcut(event, {
@@ -415,7 +427,8 @@ export function createUI(root, options) {
 
     group('View & Scene');
     button('Center View', onResetCamera);
-    button('Export', onExport);
+    button('Export OBJ + MTL', onExport);
+    if (onExportJSON) button('Legacy JSON', onExportJSON);
     const sceneControls = document.createElement('div');
     sceneControls.className = 'scene-controls';
     activeToolGroup.appendChild(sceneControls);
@@ -459,14 +472,17 @@ export function createUI(root, options) {
     sceneControls.appendChild(streamingLabel);
     const loadSceneLabel = document.createElement('label');
     loadSceneLabel.className = 'editor-button';
-    loadSceneLabel.textContent = 'Import Scene';
+    loadSceneLabel.textContent = 'Import OBJ Scene';
     const loadSceneInput = document.createElement('input');
     loadSceneInput.type = 'file';
-    loadSceneInput.accept = '.json,application/json';
+    loadSceneInput.accept = '.obj,.mtl,.json,model/obj,application/json';
     loadSceneInput.hidden = true;
+    loadSceneInput.multiple = true;
     loadSceneInput.addEventListener('change', () => {
-        const file = loadSceneInput.files?.[0];
-        if (file) runSceneAction(() => sceneActions.loadFile?.(file), 'Scene imported');
+        const files = [...(loadSceneInput.files || [])];
+        const file = files.find(candidate => candidate.name.toLowerCase().endsWith('.obj')) || files[0];
+        const companions = files.filter(candidate => candidate !== file);
+        if (file) runSceneAction(() => sceneActions.loadFile?.(file, companions), 'OBJ scene imported');
         loadSceneInput.value = '';
     });
     loadSceneLabel.appendChild(loadSceneInput);
@@ -732,8 +748,11 @@ export function createUI(root, options) {
     let uvDrag = null;
     const uvRegion = { x: 270, y: 80, width: 460, height: 460 };
 
-    function drawUvWorkspace() {
+    let lastUvDrawAt = 0;
+    function drawUvWorkspace(now = performance.now(), force = false) {
         if (!selectedMesh || !container.classList.contains('uv-mode')) return;
+        if (!force && now - lastUvDrawAt < 80) return;
+        lastUvDrawAt = now;
         const context = uvCanvas.getContext('2d');
         context.clearRect(0, 0, uvCanvas.width, uvCanvas.height);
         context.fillStyle = '#111923';
@@ -1058,14 +1077,21 @@ export function createUI(root, options) {
         setFace: faceIndex => { inspector.setFace(faceIndex); refreshUvTransformControls(); refreshFaceImageControls(); drawUvWorkspace(); },
         refreshHierarchy: hierarchy.refresh,
         refreshBones: bones.refresh,
-        setInternalFps: (fps, frameMs) => { fpsReadout.textContent = `Internal FPS ${Math.round(fps)} | ${frameMs.toFixed(2)} ms`; },
-        setPolygonCount: (current, total) => { polygonReadout.textContent = `Current Mesh Polygons / All Polygons: ${current} / ${total}`; },
+        setInternalFps: (fps, frameMs) => {
+            const next = `Internal FPS ${Math.round(fps)} | ${frameMs.toFixed(2)} ms`;
+            if (fpsReadout.textContent !== next) fpsReadout.textContent = next;
+        },
+        setPolygonCount: (current, total) => {
+            const next = `Current Mesh Polygons / All Polygons: ${current} / ${total}`;
+            if (polygonReadout.textContent !== next) polygonReadout.textContent = next;
+        },
         setStatus: message => { editorStatus.last = message; refreshStatus(); },
         setEditorState: state => { Object.assign(editorStatus, state); refreshStatus(); },
         refreshStatus,
         setViewportStats: stats => {
             if (!stats) return;
-            viewportStats.textContent = `Draw calls ${stats.drawCalls} | Triangles ${stats.triangles} | Objects ${stats.objects}`;
+            const next = `Draw calls ${stats.drawCalls} | Triangles ${stats.triangles} | Objects ${stats.objects}`;
+            if (viewportStats.textContent !== next) viewportStats.textContent = next;
         },
         setStatus: message => { operatorStatus.textContent = message; },
         setCameraView: view => cameraButtons.forEach((element, key) => element.classList.toggle('selected', key === view)),
@@ -1074,7 +1100,7 @@ export function createUI(root, options) {
         refreshPrefabs: assets.refreshPrefabs,
         refreshScenes,
         refreshLight: lighting.refresh,
-        updateUvWorkspace: drawUvWorkspace,
+        updateUvWorkspace: (now) => drawUvWorkspace(now),
         updateAnimationWorkspace: (time, playing) => bones.updatePlayback(time, playing),
         setPickMode: mode => {
             setPickMode(mode);

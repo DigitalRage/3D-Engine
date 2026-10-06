@@ -5,10 +5,18 @@ export class Renderer {
     constructor(canvas) {
         this.canvas = canvas;
         this.overlayCanvas = document.getElementById('viewport-overlay');
-        this.gl = canvas.getContext('webgl');
+        this.gl = canvas.getContext('webgl', {
+            antialias: false,
+            depth: true,
+            alpha: false,
+            powerPreference: 'high-performance',
+            preserveDrawingBuffer: false
+        });
         if (!this.gl) throw new Error('WebGL not supported');
         this.instancingExtension = this.gl.getExtension('ANGLE_instanced_arrays');
         this.instanceBuffer = null;
+        this.instanceScratch = new Float32Array(0);
+        this.instanceBufferCapacity = 0;
 
         this.resize();
         this.gl.clearColor(0.1, 0.1, 0.15, 1.0);
@@ -22,6 +30,10 @@ export class Renderer {
         this.frameStats = { drawCalls: 0, triangles: 0, objects: 0 };
         this.uniforms = null;
         this.shadowSignature = null;
+        this._renderPlanCache = null;
+        this._skeletonCache = { revision: -1, meshes: [] };
+        this._lastCullState = null;
+        this._identity = identityMatrix();
         this.ready = this.initProgram();
     }
 
@@ -62,9 +74,14 @@ export class Renderer {
             uLightThreshold: gl.getUniformLocation(prog, 'uLightThreshold'),
             uShadeColor: gl.getUniformLocation(prog, 'uShadeColor'),
             uInstanced: gl.getUniformLocation(prog, 'uInstanced'),
-            aInstance: [0, 1, 2, 3].map(index => gl.getAttribLocation(prog, `aInstance${index}`))
+            aInstance: [0, 1, 2, 3].map(index => gl.getAttribLocation(prog, `aInstance${index}`)),
+            aInstanceColor: gl.getAttribLocation(prog, 'aInstanceColor')
         };
         gl.useProgram(this.program);
+        if (this.uniforms.aInstanceColor >= 0) {
+            gl.disableVertexAttribArray(this.uniforms.aInstanceColor);
+            gl.vertexAttrib4f(this.uniforms.aInstanceColor, 1, 1, 1, 1);
+        }
     }
 
     createShader(type, src) {
@@ -97,143 +114,146 @@ export class Renderer {
         const gl = this.gl;
         if (!this.program) return;
 
-        scene.meshes.forEach(mesh => {
-            if (mesh.dirtyFlags.geometry || mesh.dirtyFlags.uvs) mesh.rebuildRenderData();
-            else if (mesh.dirtyFlags.materials || mesh.dirtyFlags.selection) mesh.updateRenderQueues();
-        });
-        scene.consumeDirtyFlags?.();
+        const view = camera.getViewMatrix();
+        const proj = camera.getProjectionMatrix(this.canvas.width / this.canvas.height);
+        const cameraKey = makeCameraKey(camera, this.canvas.width, this.canvas.height);
+        const planKey = `${scene.renderRevision}|${cameraKey}|${this.renderMode}`;
+        let plan = this._renderPlanCache?.key === planKey ? this._renderPlanCache.plan : null;
+        const light = scene.light;
 
         gl.clearColor(0.1, 0.1, 0.15, 1.0);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         gl.enable(gl.DEPTH_TEST);
         gl.depthFunc(gl.LESS);
-
+        gl.frontFace(gl.CCW);
         gl.useProgram(this.program);
         const frameId = ++this.frameId;
-        const stats = {
-            drawCalls: 0,
-            triangles: 0,
-            objects: scene.meshes.length
-        };
-
-        const view = camera.getViewMatrix();
-        const proj = camera.getProjectionMatrix(this.canvas.width / this.canvas.height);
-
+        this._lastCullState = null;
+        const stats = { drawCalls: 0, triangles: 0, objects: 0 };
         gl.uniformMatrix4fv(this.uniforms.uView, false, view);
         gl.uniformMatrix4fv(this.uniforms.uProj, false, proj);
-        const light = scene.light;
         if (light) {
             const lightLength = Math.hypot(...light.direction);
-            const lightDirection = lightLength > 1e-8 ? light.direction.map(value => value / lightLength) : [0, -1, 0];
-            gl.uniform3fv(this.uniforms.uLightDirection, new Float32Array(lightDirection));
-            gl.uniform3fv(this.uniforms.uLightColor, new Float32Array(light.color));
+            const lx = lightLength > 1e-8 ? light.direction[0] / lightLength : 0;
+            const ly = lightLength > 1e-8 ? light.direction[1] / lightLength : -1;
+            const lz = lightLength > 1e-8 ? light.direction[2] / lightLength : 0;
+            gl.uniform3f(this.uniforms.uLightDirection, lx, ly, lz);
+            gl.uniform3fv(this.uniforms.uLightColor, light.color);
             gl.uniform1f(this.uniforms.uLightIntensity, light.intensity);
             gl.uniform1f(this.uniforms.uLightThreshold, light.threshold);
-            gl.uniform3fv(this.uniforms.uShadeColor, new Float32Array(light.shadeColor));
+            gl.uniform3fv(this.uniforms.uShadeColor, light.shadeColor);
         }
-        // Skip full raytraced shadows when scene is huge (keeps anime mode interactive for thousands of objects).
-        // Hard shadows still apply for smaller scenes; large scenes keep flat toon lighting only.
+
         const meshCount = scene.meshes.length;
-        const sceneTriangleCount = scene.meshes.reduce((sum, mesh) => sum + (mesh.triangleCount || 0), 0);
+        const sceneTriangleCount = scene._triangleCountCacheRevision === scene.renderRevision
+            ? scene._triangleCountCache
+            : scene.meshes.reduce((sum, mesh) => sum + (mesh.triangleCount || 0), 0);
+        scene._triangleCountCache = sceneTriangleCount;
+        scene._triangleCountCacheRevision = scene.renderRevision;
         const shadowEligible = meshCount <= 800 && sceneTriangleCount <= 20000;
-        const shadowSignature = (this.renderMode === 'anime' && shadowEligible) ? makeShadowSignature(scene) : null;
+        const shadowSignature = (this.renderMode === 'anime' && shadowEligible)
+            ? `${scene.renderRevision}|${scene.lightRevision}|${meshCount}|${sceneTriangleCount}` : null;
         if (this.renderMode === 'anime' && shadowEligible && shadowSignature !== this.shadowSignature) {
             const tracedShadows = traceDirectionalShadowFaces(scene, light);
-            scene.meshes.forEach(mesh => {
-                const next = tracedShadows.get(mesh) || Array(mesh.faceCount).fill(false);
-                const previous = mesh.shadowedFaces || [];
-                if (next.length !== previous.length || next.some((shadowed, index) => shadowed !== previous[index])) {
+            for (const mesh of scene.meshes) {
+                const next = tracedShadows.get(mesh) || [];
+                if (next.length !== (mesh.shadowedFaces?.length || 0) || next.some((v, i) => v !== mesh.shadowedFaces[i])) {
                     mesh.shadowedFaces = next;
                     mesh.shadowedFaceCount = next.reduce((count, value) => count + (value ? 1 : 0), 0);
                     mesh.shadowVersion = (mesh.shadowVersion || 0) + 1;
                 }
-            });
-            this.shadowSignature = shadowSignature;
-        } else if (this.renderMode !== 'anime' || !shadowEligible) {
-            if (!shadowEligible) {
-                // Avoid per-face ray tracing on very dense or aggressively merged scenes.
-                scene.meshes.forEach(mesh => {
-                    if (mesh.shadowedFaces?.length || mesh.shadowedFaceCount) {
-                        mesh.shadowedFaces = [];
-                        mesh.shadowedFaceCount = 0;
-                        mesh.shadowVersion = (mesh.shadowVersion || 0) + 1;
-                    }
-                });
             }
+            this.shadowSignature = shadowSignature;
+        } else if (!shadowEligible && this.shadowSignature !== '__none__') {
+            for (const mesh of scene.meshes) {
+                if (mesh.shadowedFaces?.length || mesh.shadowedFaceCount) {
+                    mesh.shadowedFaces = [];
+                    mesh.shadowedFaceCount = 0;
+                    mesh.shadowVersion = (mesh.shadowVersion || 0) + 1;
+                }
+            }
+            this.shadowSignature = '__none__';
+        } else if (this.renderMode !== 'anime') {
             this.shadowSignature = null;
         }
 
+        if (!plan || this.renderMode === 'wireframe') {
+            const transparentFaces = [];
+            const opaqueMeshes = [];
+            const instanceGroups = new Map();
+            const frustum = extractFrustumPlanes(view, proj);
+            let culled = 0;
+            const useFrustumCull = meshCount > 50;
+            for (const mesh of scene.meshes) {
+                if (mesh._boundsDirty) mesh.refreshBounds?.();
+                if (useFrustumCull && mesh.boundsCenter && !meshInFrustumFast(mesh, frustum, camera)) { culled++; continue; }
+                if (mesh.dirtyFlags.geometry || mesh.dirtyFlags.uvs) mesh.rebuildRenderData({ buildEditorData: !mesh.lazyTopology });
+                else if (mesh.dirtyFlags.materials || mesh.dirtyFlags.selection) mesh.updateRenderQueues();
+                if (mesh.opaqueFaceIndices?.length || !mesh.transparentFaceIndices?.length) {
+                    const key = this.instancingExtension ? mesh.getInstanceBatchKey() : null;
+                    if (key) {
+                        if (!instanceGroups.has(key)) instanceGroups.set(key, []);
+                        instanceGroups.get(key).push(mesh);
+                    } else opaqueMeshes.push(mesh);
+                }
+                if (mesh.transparentFaceIndices?.length) {
+                    const model = mesh.getModelMatrix();
+                    for (const faceIndex of mesh.transparentFaceIndices) {
+                        const range = mesh.faceRanges?.[faceIndex];
+                        const polygon = mesh.polygons?.[faceIndex];
+                        if (!polygon?.length) continue;
+                        let cx = 0, cy = 0, cz = 0;
+                        for (const vertex of polygon) { cx += vertex[0]; cy += vertex[1]; cz += vertex[2]; }
+                        const inv = 1 / polygon.length;
+                        cx *= inv; cy *= inv; cz *= inv;
+                        const world = transformPoint(model, [cx, cy, cz]);
+                        const dx = world[0] - camera.position[0], dy = world[1] - camera.position[1], dz = world[2] - camera.position[2];
+                        transparentFaces.push({ mesh, faceIndex, distance: dx*dx + dy*dy + dz*dz });
+                    }
+                }
+            }
+            const MAX_INSTANCES = 512;
+            const opaqueCommands = [];
+            for (const meshes of instanceGroups.values()) {
+                if (meshes.length > 1) {
+                    // Keep instances within each material/geometry batch front-to-back.
+                    // This preserves early-Z efficiency instead of letting a giant instance
+                    // group render in scene-storage order.
+                    meshes.sort((a, b) => distanceSqToMesh(a, camera) - distanceSqToMesh(b, camera));
+                    for (let i = 0; i < meshes.length; i += MAX_INSTANCES) {
+                        const chunk = meshes.slice(i, i + MAX_INSTANCES);
+                        opaqueCommands.push({ kind: 'instances', meshes: chunk, distance: distanceSqToMesh(chunk[0], camera) });
+                    }
+                } else opaqueMeshes.push(meshes[0]);
+            }
+            for (const mesh of opaqueMeshes) opaqueCommands.push({ kind: 'mesh', mesh, distance: distanceSqToMesh(mesh, camera) });
+            if (opaqueCommands.length <= 2000) opaqueCommands.sort((a, b) => a.distance - b.distance);
+            transparentFaces.sort((a, b) => b.distance - a.distance);
+            plan = { opaqueCommands, transparentFaces, culled };
+            this._renderPlanCache = { key: planKey, plan };
+        }
+
+        stats.culled = plan.culled || 0;
+        stats.objects = meshCount - stats.culled;
         if (this.renderMode === 'wireframe') {
             gl.disable(gl.CULL_FACE);
-            stats.triangles = scene.meshes.reduce((sum, mesh) => sum + mesh.triangleCount, 0);
-            scene.meshes.forEach(mesh => mesh.draw(gl, this.program, null, frameId, this.renderMode, stats));
+            for (const mesh of scene.meshes) mesh.draw(gl, this.program, null, frameId, this.renderMode, stats);
             this.frameStats = stats;
             return;
         }
-
-        const transparentFaces = [];
-        const opaqueMeshes = [];
-        const instanceGroups = new Map();
-        const frustum = extractFrustumPlanes(view, proj);
-        let culled = 0;
-        const useFrustumCull = scene.meshes.length > 50; // only when it matters
-        scene.meshes.forEach(mesh => {
-            if (useFrustumCull && mesh.boundsMin && mesh.boundsMax && !meshInFrustum(mesh, frustum)) {
-                culled++;
-                return;
-            }
-            if (mesh.opaqueFaceIndices && mesh.opaqueFaceIndices.length) {
-                const key = this.instancingExtension ? mesh.getInstanceBatchKey() : null;
-                if (key) {
-                    if (!instanceGroups.has(key)) instanceGroups.set(key, []);
-                    instanceGroups.get(key).push(mesh);
-                } else opaqueMeshes.push(mesh);
-            } else if (!mesh.transparentFaceIndices?.length) {
-                // Fallback: mesh may still need a full draw (e.g. before queues updated)
-                opaqueMeshes.push(mesh);
-            }
-            if (!mesh.transparentFaceIndices || !mesh.transparentFaceIndices.length) return;
-            const model = mesh.getModelMatrix();
-            mesh.transparentFaceIndices.forEach(faceIndex => {
-                const polygon = mesh.polygons[faceIndex];
-                if (!polygon || !polygon.length) return;
-                const center = polygon.reduce((sum, vertex) => sum.map((value, axis) => value + vertex[axis] / polygon.length), [0, 0, 0]);
-                const worldCenter = transformPoint(model, center);
-                const distance = Math.hypot(...worldCenter.map((value, axis) => value - camera.position[axis]));
-                transparentFaces.push({ mesh, faceIndex, distance });
-            });
-        });
-        stats.culled = culled;
-        stats.objects = scene.meshes.length - culled;
-
         gl.depthMask(true);
-        const MAX_INSTANCES = 512;
-        const opaqueCommands = [];
-        for (const meshes of instanceGroups.values()) {
-            if (meshes.length > 1) {
-                for (let i = 0; i < meshes.length; i += MAX_INSTANCES) {
-                    const chunk = meshes.slice(i, i + MAX_INSTANCES);
-                    opaqueCommands.push({ kind: 'instances', meshes: chunk, distance: distanceSqToMesh(chunk[0], camera) });
-                }
-            } else {
-                opaqueMeshes.push(meshes[0]);
-            }
-        }
-        opaqueMeshes.forEach(mesh => opaqueCommands.push({ kind: 'mesh', mesh, distance: distanceSqToMesh(mesh, camera) }));
-        opaqueCommands.sort((a, b) => a.distance - b.distance);
-        for (const command of opaqueCommands) {
+        for (const command of plan.opaqueCommands) {
             const material = command.kind === 'mesh' ? command.mesh.material : command.meshes[0].material;
-            setBackfaceCulling(gl, material);
+            this.setBackfaceCullingCached(material);
             if (command.kind === 'instances') this.drawInstancedMeshes(command.meshes, frameId, stats);
             else command.mesh.draw(gl, this.program, command.mesh.opaqueFaceIndices, frameId, this.renderMode, stats);
         }
-        if (transparentFaces.length) {
+        if (plan.transparentFaces.length) {
             gl.enable(gl.BLEND);
             gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-            transparentFaces.sort((a, b) => b.distance - a.distance);
             gl.depthMask(false);
-            for (const face of transparentFaces) {
-                setBackfaceCulling(gl, face.mesh.material);
+            for (const face of plan.transparentFaces) {
+                this.setBackfaceCullingCached(face.mesh.material);
                 face.mesh.draw(gl, this.program, [face.faceIndex], frameId, this.renderMode, stats);
             }
             gl.depthMask(true);
@@ -241,6 +261,15 @@ export class Renderer {
         }
         this.drawSkeletons(scene, stats);
         this.frameStats = stats;
+    }
+
+    setBackfaceCullingCached(material) {
+        const enabled = !material?.doubleSided;
+        if (this._lastCullState === enabled) return;
+        this._lastCullState = enabled;
+        const gl = this.gl;
+        if (enabled) { gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); }
+        else gl.disable(gl.CULL_FACE);
     }
 
     drawInstancedMeshes(meshes, frameId, stats) {
@@ -252,16 +281,39 @@ export class Renderer {
         else template.vaoExtension.bindVertexArrayOES(template.vao);
 
         if (!this.instanceBuffer) this.instanceBuffer = gl.createBuffer();
-        const matrices = new Float32Array(meshes.length * 16);
-        meshes.forEach((mesh, index) => matrices.set(mesh.getModelMatrix(), index * 16));
+        const instanceStride = 20;
+        const requiredFloats = meshes.length * instanceStride;
+        if (this.instanceScratch.length < requiredFloats) {
+            let next = Math.max(instanceStride * 64, this.instanceScratch.length || instanceStride * 64);
+            while (next < requiredFloats) next *= 2;
+            this.instanceScratch = new Float32Array(next);
+        }
+        const instanceData = this.instanceScratch;
+        meshes.forEach((mesh, index) => {
+            const base = index * instanceStride;
+            const model = mesh.getModelMatrix();
+            instanceData.set(model, base);
+            const color = mesh.material?.color || [1, 1, 1, 1];
+            instanceData[base + 16] = color[0] ?? 1;
+            instanceData[base + 17] = color[1] ?? 1;
+            instanceData[base + 18] = color[2] ?? 1;
+            instanceData[base + 19] = color[3] ?? 1;
+        });
         gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, matrices, gl.DYNAMIC_DRAW);
+        if (this.instanceBufferCapacity < instanceData.length) {
+            gl.bufferData(gl.ARRAY_BUFFER, instanceData.byteLength, gl.DYNAMIC_DRAW);
+            this.instanceBufferCapacity = instanceData.length;
+        }
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, instanceData.subarray(0, requiredFloats));
         this.uniforms.aInstance.forEach((attribute, index) => {
             gl.enableVertexAttribArray(attribute);
-            gl.vertexAttribPointer(attribute, 4, gl.FLOAT, false, 64, index * 16);
+            gl.vertexAttribPointer(attribute, 4, gl.FLOAT, false, instanceStride * 4, index * 16);
             extension.vertexAttribDivisorANGLE(attribute, 1);
         });
-        gl.uniformMatrix4fv(this.uniforms.uModel, false, identityMatrix());
+        gl.enableVertexAttribArray(this.uniforms.aInstanceColor);
+        gl.vertexAttribPointer(this.uniforms.aInstanceColor, 4, gl.FLOAT, false, instanceStride * 4, 64);
+        extension.vertexAttribDivisorANGLE(this.uniforms.aInstanceColor, 1);
+        gl.uniformMatrix4fv(this.uniforms.uModel, false, this._identity);
         gl.uniform1f(this.uniforms.uInstanced, 1);
         gl.uniform1f(this.uniforms.uToonShading, this.renderMode === 'anime' && template.material.shading === 'toon' ? 1 : 0);
 
@@ -284,6 +336,9 @@ export class Renderer {
             extension.vertexAttribDivisorANGLE(attribute, 0);
             gl.disableVertexAttribArray(attribute);
         });
+        extension.vertexAttribDivisorANGLE(this.uniforms.aInstanceColor, 0);
+        gl.disableVertexAttribArray(this.uniforms.aInstanceColor);
+        gl.vertexAttrib4f(this.uniforms.aInstanceColor, 1, 1, 1, 1);
         gl.uniform1f(this.uniforms.uInstanced, 0);
         if (gl.createVertexArray) gl.bindVertexArray(null);
         else template.vaoExtension.bindVertexArrayOES(null);
@@ -292,8 +347,10 @@ export class Renderer {
     drawSkeletons(scene, stats) {
         const gl = this.gl;
         const lineData = [];
-        scene.meshes.forEach(mesh => {
-            if (!mesh.skeleton.bones.length) return;
+        if (this._skeletonCache.revision !== scene.renderRevision) {
+            this._skeletonCache = { revision: scene.renderRevision, meshes: scene.meshes.filter(mesh => mesh.skeleton.bones.length) };
+        }
+        this._skeletonCache.meshes.forEach(mesh => {
             const model = mesh.getModelMatrix();
             const transforms = mesh.skeleton.getWorldTransforms();
             mesh.skeleton.bones.forEach((bone, index) => {
@@ -322,7 +379,7 @@ export class Renderer {
         gl.vertexAttribPointer(color, 3, gl.FLOAT, false, 24, 12);
         gl.disableVertexAttribArray(uv);
         gl.vertexAttrib2f(uv, 0, 0);
-        gl.uniformMatrix4fv(this.uniforms.uModel, false, identityMatrix());
+        gl.uniformMatrix4fv(this.uniforms.uModel, false, this._identity);
         gl.uniform1f(this.uniforms.uInstanced, 0);
         gl.uniform1f(this.uniforms.uToonShading, 0);
         gl.uniform1f(this.uniforms.uRayShadowed, 0);
@@ -338,6 +395,50 @@ export class Renderer {
         gl.enable(gl.DEPTH_TEST);
         gl.depthFunc(gl.LESS);
     }
+}
+
+function makeCameraKey(camera, width, height) {
+    let h = 2166136261;
+    const values = [camera.position[0], camera.position[1], camera.position[2], camera.target[0], camera.target[1], camera.target[2], camera.fov, camera.near, camera.far, camera.orthographicHeight, camera.viewMode === 'perspective' ? 1 : 0, width, height];
+    for (const value of values) { const bits = Math.round(Number(value) * 100000); h = Math.imul(h ^ bits, 16777619); }
+    return h >>> 0;
+}
+
+function meshInFrustumFast(mesh, planes, camera) {
+    const center = mesh.boundsCenter;
+    if (mesh._cullTransformRevision !== mesh.transformRevision || !mesh._cullWorldCenter) {
+        const model = mesh.getModelMatrix();
+        mesh._cullWorldCenter = [
+            model[0] * center[0] + model[4] * center[1] + model[8] * center[2] + model[12],
+            model[1] * center[0] + model[5] * center[1] + model[9] * center[2] + model[13],
+            model[2] * center[0] + model[6] * center[1] + model[10] * center[2] + model[14]
+        ];
+        const scale = mesh.scale || [1, 1, 1];
+        mesh._cullWorldRadius = (Number(mesh.boundsRadius) || 0) * Math.max(Math.abs(scale[0]), Math.abs(scale[1]), Math.abs(scale[2]), 1e-6) * 1.03;
+        mesh._cullTransformRevision = mesh.transformRevision;
+    }
+    const [wx, wy, wz] = mesh._cullWorldCenter;
+    const radius = mesh._cullWorldRadius || 0;
+    for (const plane of planes) if (plane[0] * wx + plane[1] * wy + plane[2] * wz + plane[3] < -radius) return false;
+    // Tiny-object culling for very large scenes. Keep an object if it is likely to cover at least ~0.65 pixel.
+    if (camera.viewMode === 'perspective' && sceneObjectCullEnabled(mesh)) {
+        const dx = wx - camera.position[0], dy = wy - camera.position[1], dz = wz - camera.position[2];
+        const distance = Math.max(0.01, Math.hypot(dx, dy, dz));
+        const projectedRadius = radius * 1080 / (distance * Math.max(0.25, Math.tan(camera.fov / 2)));
+        if (projectedRadius < 0.325) return false;
+    }
+    return true;
+}
+
+function sceneObjectCullEnabled(mesh) { return !!mesh && !mesh.alwaysVisible; }
+
+function normalMatrixFromModel(m) {
+    const a00=m[0], a01=m[4], a02=m[8], a10=m[1], a11=m[5], a12=m[9], a20=m[2], a21=m[6], a22=m[10];
+    const b01=a22*a11-a12*a21, b11=-a22*a10+a12*a20, b21=a21*a10-a11*a20;
+    let det=a00*b01+a01*b11+a02*b21;
+    if (Math.abs(det)<1e-8) return new Float32Array([1,0,0,0,1,0,0,0,1]);
+    det=1/det;
+    return new Float32Array([b01*det,(-a22*a01+a02*a21)*det,(a12*a01-a02*a11)*det,b11*det,(a22*a00-a02*a20)*det,(-a12*a00+a02*a10)*det,b21*det,(-a21*a00+a01*a20)*det,(a11*a00-a01*a10)*det]);
 }
 
 function transformPoint(matrix, point) {
@@ -357,28 +458,15 @@ function identityMatrix() {
 
 function makeShadowSignature(scene) {
     let hash = 2166136261;
-    const add = value => {
-        hash = Math.imul(hash ^ Math.round((Number(value) || 0) * 1e5), 16777619);
-    };
-    add(scene.meshes.length);
+    const add = value => { hash = Math.imul(hash ^ (Number(value) | 0), 16777619); };
     add(scene.geometryRevision);
-    scene.light?.direction.forEach(add);
+    add(scene.lightRevision);
+    add(scene.meshes.length);
     scene.meshes.forEach(mesh => {
         add(mesh.geometryRevision);
-        for (const character of mesh.geometrySignature) add(character.charCodeAt(0));
-        add(mesh.material.shading === 'toon' ? 1 : 0);
-        mesh.faceColors.forEach(color => add(color[3] ?? 1));
-        mesh.position.forEach(add);
-        mesh.rotation.forEach(add);
-        mesh.scale.forEach(add);
+        add(mesh.renderStateVersion);
+        add(mesh.transformRevision);
         add(mesh.skinRevision);
-        if (!mesh.vertexWeights.size) return;
-        if (mesh.animationPlayer.playing) add(Math.floor(mesh.animationPlayer.time * 24));
-        else mesh.skeleton.bones.forEach(bone => {
-            bone.position.forEach(add);
-            bone.rotation.forEach(add);
-            bone.scale.forEach(add);
-        });
     });
     return hash >>> 0;
 }

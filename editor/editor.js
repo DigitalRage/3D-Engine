@@ -11,7 +11,8 @@ import { TextureLibrary } from './textureLibrary.js';
 import { SelectionModel } from './selection.js';
 import { executeMeshCommand, executeSceneCommand } from './ops/meshCommands.js';
 import { runMeshOperator } from './ops/meshOperators.js';
-import { createDefaultAudioSceneConfig, normalizeAudioSceneConfig } from '../engine/audio.js';
+import { createDefaultAudioSceneConfig, normalizeAudioSceneConfig } from '../engine/audioConfig.js';
+import { exportOBJ, parseMTL, parseOBJ } from '../engine/obj.js';
 
 export class Editor {
     constructor(scene, camera, renderer, audioManager = null) {
@@ -65,7 +66,7 @@ export class Editor {
                 activeId: () => this.sceneManager.activeSceneId,
                 create: () => this.createScene(),
                 save: () => this.saveScene(),
-                loadFile: file => this.loadSceneFile(file),
+                loadFile: (file, companionFiles = []) => this.loadSceneFile(file, companionFiles),
                 duplicate: () => this.duplicateScene(),
                 delete: () => this.deleteScene(),
                 switch: id => this.switchScene(id),
@@ -128,12 +129,13 @@ export class Editor {
             onToggleAnimation: time => this.playAnimation(time),
             onRenameAnimation: name => this.renameAnimation(name),
             onSetAnimationDuration: duration => this.setAnimationDuration(duration),
-            onImportMesh: file => this.importMesh(file),
+            onImportMesh: (file, companionFiles = []) => this.importMesh(file, companionFiles),
             onImportTexture: file => this.importTexture(file),
             onDelete: mesh => this.deleteSelected(mesh),
             onReorderMesh: (mesh, index) => this.reorderMesh(mesh, index),
             onResetCamera: () => this.resetCamera(),
-            onExport: () => this.exportScene(),
+            onExport: () => this.exportOBJ(),
+            onExportJSON: () => this.exportSceneJSON(),
             onUndo: () => this.undo(),
             onRedo: () => this.redo(),
             onHistory: () => this.recordHistory()
@@ -147,17 +149,18 @@ export class Editor {
                 this.selectElement(mesh, 'vertex', sharedVertexIndex, { faceIndex, vertexIndex }, modifiers);
             },
             onPickEmpty: modifiers => { if (!modifiers.additive) this.select(null); },
-            onHistoryStart: () => this.snapshotScene(),
-            onHistoryEnd: snapshot => this.recordHistorySnapshot(snapshot),
+            getSelection: () => ({
+                meshes: this.selectedMeshes,
+                faces: this.selectedFaces,
+                edges: this.selectedEdges,
+                vertices: this.selectedVertices
+            }),
+            onHistoryStart: context => this.beginInteractionHistory(context),
+            onHistoryEnd: snapshot => this.recordInteractionHistory(snapshot),
             onCameraViewChange: view => this.ui.setCameraView(view),
-            onTransform: mesh => {
-                // Lightweight: only mark transform dirty and refresh UI selection.
-                // Full asset refresh is deferred until save/export or explicit request.
-                mesh.transformRevision = (mesh.transformRevision || 0) + 1;
-                mesh.markDirty?.('transform');
-                this.ui.setSelected(mesh);
-                // Avoid full hierarchy rebuild on every mouse move end; only if needed.
-                if (this.selectedMeshes.size <= 8) this.ui.refreshHierarchy();
+            onTransform: meshes => {
+                this.ui.setSelected(this.selected);
+                if (this.selectedMeshes.size <= 16) this.ui.refreshHierarchy();
             }
         });
 
@@ -165,14 +168,20 @@ export class Editor {
         this.select(scene.meshes[0] || null);
     }
 
-    update() {
+    update(now = performance.now()) {
         this.gizmos.update();
-        this.ui.updateUvWorkspace();
-        this.ui.updateAnimationWorkspace(this.selected?.animationPlayer.time || 0, this.selected?.animationPlayer.playing || false);
-        this.ui.refreshStatus();
-        const allPolygons = this.scene.meshes.reduce((sum, mesh) => sum + mesh.faceCount, 0);
-        this.ui.setPolygonCount(this.selected?.faceCount || 0, allPolygons);
-        this.ui.setViewportStats(this.renderer.frameStats);
+        this.ui.updateUvWorkspace?.(now);
+        if (this.selected?.animationPlayer.playing || now - (this._lastAnimationUiUpdate || 0) > 100) {
+            this.ui.updateAnimationWorkspace(this.selected?.animationPlayer.time || 0, this.selected?.animationPlayer.playing || false);
+            this._lastAnimationUiUpdate = now;
+        }
+        if (now - (this._lastStatusUiUpdate || 0) > 100) {
+            this.ui.refreshStatus();
+            const allPolygons = this.scene.meshes.reduce((sum, mesh) => sum + mesh.faceCount, 0);
+            this.ui.setPolygonCount(this.selected?.faceCount || 0, allPolygons);
+            this.ui.setViewportStats(this.renderer.frameStats);
+            this._lastStatusUiUpdate = now;
+        }
     }
 
     async initializeScenes() {
@@ -234,7 +243,12 @@ export class Editor {
         return removed;
     }
 
-    async loadSceneFile(file) {
+    async loadSceneFile(file, companionFiles = []) {
+        const extension = file.name.toLowerCase().split('.').pop();
+        if (extension === 'obj') {
+            const data = await this.readOBJFiles(file, companionFiles);
+            return this.createSceneFromOBJData(data, file.name.replace(/\.[^.]+$/, '') || 'Imported OBJ Scene');
+        }
         const data = JSON.parse(await file.text());
         if (!data || !Array.isArray(data.meshes)) throw new TypeError('The selected file is not a scene export');
         if (data.assetManifest) {
@@ -996,7 +1010,67 @@ export class Editor {
         this.ui.refreshBones();
     }
 
-    async importMesh(file) {
+    async readOBJFiles(file, companionFiles = []) {
+        const objText = await file.text();
+        const mtlFile = (companionFiles || []).find(candidate => candidate.name.toLowerCase().endsWith('.mtl'));
+        const materials = mtlFile ? parseMTL(await mtlFile.text()) : new Map();
+        return parseOBJ(objText, { materials });
+    }
+
+    addOBJMeshes(data) {
+        const importedMeshes = [];
+        for (const objectData of data.objects || []) {
+            const firstColor = objectData.faceColors?.find(Boolean) || [0.78, 0.84, 0.92];
+            const material = new Material({
+                color: firstColor,
+                baseColor: firstColor,
+                shading: 'toon',
+                name: `${objectData.name || 'OBJ'} Material`
+            });
+            const mesh = new Mesh(material);
+            mesh.setTopology(objectData.positions || [], objectData.faces || []);
+            mesh.name = objectData.name || 'Imported OBJ Object';
+            mesh.faceColors = (objectData.faceColors || []).map(color => [...color, 1]);
+            if (objectData.faceUvs?.length) mesh.faceUvs = objectData.faceUvs.map(face => face.map(uv => [...uv]));
+            mesh.rebuildRenderData();
+            this.scene.add(mesh);
+            importedMeshes.push(mesh);
+        }
+        this.refreshSceneAssets();
+        this.ui.refreshHierarchy();
+        this.select(importedMeshes[importedMeshes.length - 1] || null);
+        return importedMeshes;
+    }
+
+    async createSceneFromOBJData(data, sceneName) {
+        const record = await this.sceneManager.createScene(sceneName, {
+            sceneName,
+            sceneAssetId: null,
+            sceneReferences: [],
+            subScenes: [],
+            light: null,
+            textureAssets: [],
+            assetManifest: { version: 1, assets: [] },
+            audio: createDefaultAudioSceneConfig(),
+            meshes: []
+        });
+        await this.sceneManager.loadScene(record.id);
+        this.scene.meshes.length = 0;
+        this.scene.name = sceneName;
+        this.scene.assetId = record.id;
+        this.addOBJMeshes(data);
+        await this.sceneManager.saveScene();
+        this.ui.refreshScenes();
+        return record;
+    }
+
+    async importMesh(file, companionFiles = []) {
+        const extension = file.name.toLowerCase().split('.').pop();
+        if (extension === 'obj') {
+            const data = await this.readOBJFiles(file, companionFiles);
+            this.recordHistory();
+            return this.addOBJMeshes(data);
+        }
         const data = JSON.parse(await file.text());
         this.recordHistory();
         if (Array.isArray(data.meshes)) {
@@ -1065,6 +1139,7 @@ export class Editor {
         }
         const resolveTexture = id => this.textureLibrary.get(textureIds.get(id) || assetIds.get(id) || id);
         const importedMeshes = [];
+        let pendingMeshes = [];
         for (const meshData of data.meshes || []) {
             const materialData = Material.fromJSON({
                 baseColor: meshData.baseColor || meshData.color || [0.78, 0.84, 0.92],
@@ -1082,29 +1157,27 @@ export class Editor {
                 assetId: meshData.materialAssetId || null,
                 name: meshData.materialName || 'Imported Material'
             });
-            const mesh = new Mesh(materialData);
+            const mesh = new Mesh(materialData, { lazyTopology: true });
             const staticOptimized = !!(meshData.staticOptimized || meshData.optimizedStatic);
-            if (meshData.positions && meshData.faces) {
-                if (staticOptimized) {
-                    mesh.bakeFaceColors = true;
-                    mesh.setStaticTopology(meshData.positions, meshData.faces, meshData.faceColors || []);
+            let importPositions = meshData.positions;
+            let importFaces = meshData.faces;
+            if (!importPositions || !importFaces) {
+                if (meshData.polygons) {
+                    // Legacy polygon-only exports stay fully editable.
+                    mesh.polygons = meshData.polygons.map(polygon => polygon.map(vertex => [...vertex]));
                 } else {
-                    mesh.setTopology(meshData.positions, meshData.faces);
+                    let vertices = meshData.vertices || [];
+                    if (vertices.length && typeof vertices[0] === 'number') vertices = Array.from({ length: vertices.length / 3 }, (_, index) => vertices.slice(index * 3, index * 3 + 3));
+                    let faces = meshData.faces || meshData.indices || [];
+                    if (faces.length && typeof faces[0] === 'number') faces = faces.length % 3 === 0 ? Array.from({ length: faces.length / 3 }, (_, index) => faces.slice(index * 3, index * 3 + 3)) : [faces];
+                    importPositions = vertices; importFaces = faces;
                 }
-            } else if (meshData.polygons) {
-                mesh.polygons = meshData.polygons.map(polygon => polygon.map(vertex => [...vertex]));
-            } else {
-                let vertices = meshData.vertices || [];
-                if (vertices.length && typeof vertices[0] === 'number') {
-                    vertices = Array.from({ length: vertices.length / 3 }, (_, index) => vertices.slice(index * 3, index * 3 + 3));
-                }
-                let faces = meshData.faces || meshData.indices || [];
-                if (faces.length && typeof faces[0] === 'number') {
-                    faces = faces.length % 3 === 0
-                        ? Array.from({ length: faces.length / 3 }, (_, index) => faces.slice(index * 3, index * 3 + 3))
-                        : [faces];
-                }
-                mesh.setTopology(vertices, faces);
+            }
+            if (importPositions && importFaces) {
+                const importedColors = meshData.faceColors || [];
+                const importedUvs = meshData.faceUvs || [];
+                const importedTransforms = (meshData.faceUvTransforms || []).map(transform => ({ scale: [...(transform.scale || [1, 1])], offset: [...(transform.offset || [0, 0])], rotation: transform.rotation || 0, flipX: !!transform.flipX, flipY: !!transform.flipY }));
+                mesh.setImportTopology(importPositions, importFaces, { faceColors: importedColors, faceUvs: importedUvs, faceUvTransforms: importedTransforms, bakeFaceColors: staticOptimized ? true : !!meshData.bakeFaceColors });
             }
             mesh.name = meshData.name || 'Imported Mesh';
             mesh.prefabInstance = meshData.prefabInstance ? JSON.parse(JSON.stringify(meshData.prefabInstance)) : null;
@@ -1116,18 +1189,6 @@ export class Editor {
             mesh.rotation = [...(meshData.rotation || [0, 0, 0])];
             mesh.scale = [...(meshData.scale || [1, 1, 1])];
             mesh.bakeFaceColors = staticOptimized ? true : !!meshData.bakeFaceColors;
-            if (!staticOptimized) {
-                mesh.faceColors = (meshData.faceColors || []).map(color => [...color]);
-                mesh.faceUvs = (meshData.faceUvs || []).map(faceUvs => faceUvs.map(uv => [...uv]));
-                mesh.faceUvTransforms = (meshData.faceUvTransforms || []).map(transform => ({
-                    scale: [...(transform.scale || [1, 1])],
-                    offset: [...(transform.offset || [0, 0])],
-                    rotation: transform.rotation || 0,
-                    flipX: !!transform.flipX,
-                    flipY: !!transform.flipY
-                }));
-                mesh.rebuildRenderData();
-            }
 
             const boneMap = new Map();
             (meshData.bones || []).forEach(boneData => {
@@ -1196,14 +1257,29 @@ export class Editor {
                 });
                 mesh.animationClip = clip;
             }
-            this.scene.add(mesh);
             importedMeshes.push(mesh);
+            pendingMeshes.push(mesh);
+            if (pendingMeshes.length >= 256) {
+                this.scene.addMany(pendingMeshes);
+                pendingMeshes = [];
+            }
+            if (importedMeshes.length === 1 || importedMeshes.length % 256 === 0 || importedMeshes.length === (data.meshes || []).length) {
+                if (pendingMeshes.length) {
+                    this.scene.addMany(pendingMeshes);
+                    pendingMeshes = [];
+                }
+                const total = Math.max(1, (data.meshes || []).length);
+                window.__setEngineLoadingProgress?.(30 + importedMeshes.length / total * 40, `Loading objects ${importedMeshes.length} / ${total}`);
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
         }
         if (refreshAssets) this.refreshSceneAssets();
         this.ui.refreshTextures();
         this.ui.refreshPrefabs();
         this.ui.refreshAudio?.();
         if (selectImported && importedMeshes.length) this.select(importedMeshes[importedMeshes.length - 1]);
+        window.__setEngineLoadingProgress?.(100, 'Ready');
+        window.__hideEngineLoadingScreen?.();
         return importedMeshes;
     }
 
@@ -1475,8 +1551,142 @@ export class Editor {
         return JSON.parse(JSON.stringify(snapshot));
     }
 
+    beginInteractionHistory(context = {}) {
+        if (context.kind === 'object-transform') {
+            const meshes = [...new Set(context.meshes || [])];
+            return {
+                kind: context.kind,
+                entries: meshes.map(mesh => ({
+                    mesh,
+                    position: [...mesh.position],
+                    rotation: [...mesh.rotation],
+                    scale: [...mesh.scale]
+                }))
+            };
+        }
+        if (context.kind === 'component-transform') {
+            const mesh = context.mesh;
+            if (!mesh) return null;
+            const indices = this.getComponentVertexIndices(context);
+            return {
+                kind: context.kind,
+                mesh,
+                indices,
+                positions: indices.map(index => ({
+                    index,
+                    position: mesh.getVertexPosition(index)
+                }))
+            };
+        }
+        return null;
+    }
+
+    getComponentVertexIndices(context = {}) {
+        const mesh = context.mesh;
+        if (!mesh) return [];
+        const selection = context.selection || {};
+        const indices = new Set();
+        if (context.mode === 'vertex') {
+            for (const item of selection.vertices || []) {
+                if (Number.isInteger(item)) indices.add(item);
+                else if (item?.mesh === mesh) indices.add(item.vertexIndex ?? item.index ?? item.sharedVertexIndex);
+            }
+            if (indices.size === 0 && Number.isInteger(context.pickedVertexIndex)) {
+                const face = mesh.faces?.[context.pickedFaceIndex];
+                if (face && Number.isInteger(face[context.pickedVertexIndex])) indices.add(face[context.pickedVertexIndex]);
+            }
+        } else if (context.mode === 'edge') {
+            for (const edge of selection.edges || []) {
+                if (edge.mesh !== mesh || !Number.isInteger(edge.faceIndex)) continue;
+                const face = mesh.faces?.[edge.faceIndex];
+                if (!face || !Number.isInteger(edge.edgeIndex)) continue;
+                indices.add(face[edge.edgeIndex % face.length]);
+                indices.add(face[(edge.edgeIndex + 1) % face.length]);
+            }
+        } else {
+            for (const item of selection.faces || []) {
+                if (item.mesh !== mesh || !Number.isInteger(item.faceIndex)) continue;
+                for (const index of mesh.faces?.[item.faceIndex] || []) indices.add(index);
+            }
+            if (indices.size === 0 && Number.isInteger(context.pickedFaceIndex)) {
+                for (const index of mesh.faces?.[context.pickedFaceIndex] || []) indices.add(index);
+            }
+        }
+        return [...indices].filter(index => Number.isInteger(index) && index >= 0 && index < mesh.positions.length / 3);
+    }
+
+    recordInteractionHistory(snapshot) {
+        if (!snapshot) return;
+        if (snapshot.kind === 'object-transform') {
+            const entries = snapshot.entries.map(entry => ({
+                ...entry,
+                afterPosition: [...entry.mesh.position],
+                afterRotation: [...entry.mesh.rotation],
+                afterScale: [...entry.mesh.scale]
+            })).filter(entry =>
+                entry.position.some((value, i) => value !== entry.afterPosition[i]) ||
+                entry.rotation.some((value, i) => value !== entry.afterRotation[i]) ||
+                entry.scale.some((value, i) => value !== entry.afterScale[i])
+            );
+            if (!entries.length) return;
+            const firstMesh = entries[0].mesh;
+            this.undoStack.push({
+                type: 'mesh-edit',
+                label: 'Transform selection',
+                mesh: firstMesh,
+                undo: () => {
+                    for (const entry of entries) {
+                        entry.mesh.position = [...entry.position];
+                        entry.mesh.rotation = [...entry.rotation];
+                        entry.mesh.scale = [...entry.scale];
+                        entry.mesh.transformRevision = (entry.mesh.transformRevision || 0) + 1;
+                        entry.mesh._modelMatrixCacheRevision = -1;
+                    }
+                },
+                redo: () => {
+                    for (const entry of entries) {
+                        entry.mesh.position = [...entry.afterPosition];
+                        entry.mesh.rotation = [...entry.afterRotation];
+                        entry.mesh.scale = [...entry.afterScale];
+                        entry.mesh.transformRevision = (entry.mesh.transformRevision || 0) + 1;
+                        entry.mesh._modelMatrixCacheRevision = -1;
+                    }
+                }
+            });
+            this.undoStack = this.undoStack.slice(-this.maxHistoryLength);
+            this.redoStack = [];
+            return;
+        }
+        if (snapshot.kind === 'component-transform') {
+            const mesh = snapshot.mesh;
+            const entries = snapshot.positions.map(entry => ({
+                index: entry.index,
+                before: [...entry.position],
+                after: mesh.getVertexPosition(entry.index)
+            })).filter(entry => entry.before.some((value, i) => value !== entry.after[i]));
+            if (!entries.length) return;
+            this.undoStack.push({
+                type: 'mesh-edit',
+                label: 'Move components',
+                mesh,
+                undo: () => {
+                    mesh.beginVertexEdit();
+                    for (const entry of entries) mesh.setVertexPosition(entry.index, entry.before);
+                    mesh.endVertexEdit();
+                },
+                redo: () => {
+                    mesh.beginVertexEdit();
+                    for (const entry of entries) mesh.setVertexPosition(entry.index, entry.after);
+                    mesh.endVertexEdit();
+                }
+            });
+            this.undoStack = this.undoStack.slice(-this.maxHistoryLength);
+            this.redoStack = [];
+        }
+    }
+
     recordHistorySnapshot(snapshot) {
-        if (!snapshot || JSON.stringify(snapshot) === JSON.stringify(this.snapshotScene())) return;
+        if (!snapshot) return;
         this.undoStack.push(snapshot);
         if (this.undoStack.length > this.maxHistoryLength) this.undoStack.shift();
         this.redoStack.length = 0;
@@ -1667,13 +1877,35 @@ export class Editor {
         return data;
     }
 
-    async exportScene() {
+    async exportOBJ() {
+        const authoredMeshes = this.getAuthoredMeshes();
+        const exported = exportOBJ(authoredMeshes, { mtllibName: 'scene.mtl' });
+        const download = (content, filename, type) => {
+            const blob = new Blob([content], { type });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        };
+        download(exported.obj, 'scene.obj', 'text/plain');
+        download(exported.mtl, 'scene.mtl', 'text/plain');
+        return exported;
+    }
+
+    async exportSceneJSON() {
         const data = await this.serializeSceneData();
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
         const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
+        const url = URL.createObjectURL(blob);
+        link.href = url;
         link.download = 'scene.json';
         link.click();
-        URL.revokeObjectURL(link.href);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async exportScene() {
+        return this.exportOBJ();
     }
 }

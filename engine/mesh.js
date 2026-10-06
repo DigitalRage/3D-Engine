@@ -4,13 +4,17 @@ import { AnimationPlayer } from './animation.js';
 import { textureHasTransparency } from './loader.js';
 
 export class Mesh {
-    constructor(material) {
+    constructor(material, { lazyTopology = false } = {}) {
         this.dirtyFlags = { geometry: true, uvs: true, materials: true, skeletonPose: true, selection: true };
         this.geometryRevision = 0;
         this.transformRevision = 0;
         this.skinRevision = 0;
         this.material = material;
         this.name = 'Mesh';
+        this._scene = null;
+        this._position = [0, 0, 0];
+        this._rotation = [0, 0, 0];
+        this._scale = [1, 1, 1];
         this.position = [0, 0, 0];
         this.rotation = [0, 0, 0];
         this.scale = [1, 1, 1];
@@ -55,6 +59,13 @@ export class Mesh {
         this.edges = [];
         this.facesOfEdge = new Map();
         this.edgesOfVertex = [];
+        this.facesOfVertex = [];
+        this.renderVertexSharedIndices = null;
+        this.renderVertexOffsetsByShared = [];
+        this.faceVertexRanges = [];
+        this._fastVertexEditDepth = 0;
+        this._fastModifiedVertices = new Set();
+        this._pendingGpuRanges = [];
         this._polygonViews = [];
         this._polygonProxy = null;
         this._legacyViewExposed = false;
@@ -69,24 +80,25 @@ export class Mesh {
         this.instanceBatchKey = null;
         this.skeleton = new Skeleton();
         this.animationPlayer = new AnimationPlayer(this);
-        this._setPolygonViews([]);
+        this.lazyTopology = !!lazyTopology;
+        if (!this.lazyTopology) this._setPolygonViews([]);
     }
 
     get positions() { return this._positions; }
     set positions(value) {
-        this._positions = observeArrays(value, () => this.markDirty('geometry'));
+        this._positions = observeArrays(value, () => { if (!this._suppressFastDirty) this.markDirty('geometry'); });
         this.markDirty('geometry');
     }
 
     get faces() { return this._faces; }
     set faces(value) {
-        this._faces = observeArrays(value, () => this.markDirty('geometry'));
+        this._faces = observeArrays(value, () => { if (!this._suppressFastDirty) this.markDirty('geometry'); });
         this.markDirty('geometry');
     }
 
     get faceUvs() { return this._faceUvs; }
     set faceUvs(value) {
-        this._faceUvs = observeArrays(value, () => this.markDirty('uvs'));
+        this._faceUvs = observeArrays(value, () => { if (!this._suppressFastDirty) this.markDirty('uvs'); });
         this.markDirty('uvs');
     }
 
@@ -146,13 +158,31 @@ export class Mesh {
         return dirty;
     }
 
+    get position() { return this._position; }
+    set position(value) { this._position = observeTransformArray(value, () => this.markTransformChanged()); this.markTransformChanged(); }
+    get rotation() { return this._rotation; }
+    set rotation(value) { this._rotation = observeTransformArray(value, () => this.markTransformChanged()); this.markTransformChanged(); }
+    get scale() { return this._scale; }
+    set scale(value) { this._scale = observeTransformArray(value, () => this.markTransformChanged()); this.markTransformChanged(); }
+
+    attachScene(scene) {
+        this._scene = scene || null;
+        return this;
+    }
+
+    markTransformChanged() {
+        this.transformRevision = (this.transformRevision || 0) + 1;
+        this._modelMatrixCacheRevision = -1;
+        this._scene?.markRenderDirty?.();
+    }
+
     get polygons() {
-        if (this.staticOptimized && !this._polygonProxy) return this._getStaticPolygonProxy();
+        if ((this.staticOptimized || this.lazyTopology) && !this._polygonProxy) return this._getStaticPolygonProxy();
         return this._polygonProxy;
     }
 
     set polygons(value) {
-        if (this.staticOptimized) this._materializeStaticPolygonViews();
+        if (this.staticOptimized || this.lazyTopology) this._materializeStaticPolygonViews();
         this._setPolygonViews(Array.isArray(value) ? value : []);
         this._legacyViewExposed = true;
         this.markDirty('geometry');
@@ -195,8 +225,9 @@ export class Mesh {
     }
 
     _materializeStaticPolygonViews() {
-        if (!this.staticOptimized) return this._polygonProxy;
+        if (!this.staticOptimized && !this.lazyTopology) return this._polygonProxy;
         this.staticOptimized = false;
+        this.lazyTopology = false;
         this._staticPolygonProxy = null;
         this._setPolygonViews(this.faces.map(face => face.map(vertexIndex => this.positions[vertexIndex])));
         this._rebuildTopologyAdjacency();
@@ -259,6 +290,13 @@ export class Mesh {
         this.edges = [];
         this.facesOfEdge = new Map();
         this.edgesOfVertex = [];
+        this.facesOfVertex = [];
+        this.renderVertexSharedIndices = null;
+        this.renderVertexOffsetsByShared = [];
+        this.faceVertexRanges = [];
+        this._fastVertexEditDepth = 0;
+        this._fastModifiedVertices = new Set();
+        this._pendingGpuRanges = [];
         this._polygonViews = [];
         this._polygonProxy = null;
         this.vertexIndexByPosition = new WeakMap();
@@ -268,6 +306,73 @@ export class Mesh {
         this.dirtyFlags.materials = false;
         this.dirtyFlags.selection = false;
         return true;
+    }
+
+    setImportTopology(positions = [], faces = [], { faceColors = [], faceUvs = [], faceUvTransforms = [], bakeFaceColors = false } = {}) {
+        this._positions = positions;
+        this._faces = faces;
+        this._faceColors = faceColors;
+        this._faceUvs = faceUvs;
+        this._faceUvTransforms = faceUvTransforms;
+        this._faceTextures = [];
+        this._faceTextureIds = [];
+        this.staticOptimized = false;
+        this.lazyTopology = true;
+        this.bakeFaceColors = !!bakeFaceColors;
+        this._polygonViews = [];
+        this._polygonProxy = null;
+        this._staticPolygonProxy = null;
+        this._legacyViewExposed = false;
+        this.vertexIndexByPosition = new WeakMap();
+        for (let i = 0; i < positions.length; i++) this.vertexIndexByPosition.set(positions[i], i);
+        this.edges = [];
+        this.facesOfEdge = new Map();
+        this.edgesOfVertex = [];
+        this.facesOfVertex = [];
+        this.faceCount = faces.length;
+        let triangles = 0;
+        for (const face of faces) triangles += Math.max(0, (face?.length || 0) - 2);
+        this.triangleCount = triangles;
+        this.allFaceIndices = Array.from({ length: this.faceCount }, (_, i) => i);
+        this.opaqueFaceIndices = this.allFaceIndices;
+        this.transparentFaceIndices = [];
+        this.faceRanges = new Array(this.faceCount);
+        this._boundsDirty = true;
+        this.markDirty('geometry', 'uvs', 'materials');
+        this.refreshBounds();
+        return this;
+    }
+
+    ensureEditorTopology() {
+        if (this.lazyTopology || this.staticOptimized) this._materializeStaticPolygonViews();
+        if (!this.edges.length || this.edgesOfVertex.length !== this.positions.length) this._rebuildTopologyAdjacency();
+        return this;
+    }
+
+    _ensureEditMaps() {
+        if (this.renderVertexOffsetsByShared?.length && this.faceVertexRanges?.length === this.faceCount) return;
+        const offsets = Array.from({ length: this.positions.length }, () => []);
+        const faceRanges = new Array(this.faceCount);
+        const faceIndexByRenderVertex = new Array(this.vertices ? this.vertices.length / 3 : 0);
+        let cursor = 0;
+        for (let faceIndex = 0; faceIndex < this.faces.length; faceIndex++) {
+            const face = this.faces[faceIndex] || [];
+            faceRanges[faceIndex] = { start: cursor, count: face.length };
+            for (let corner = 0; corner < face.length; corner++) {
+                const shared = face[corner];
+                offsets[shared]?.push(cursor + corner);
+                faceIndexByRenderVertex[cursor + corner] = faceIndex;
+            }
+            cursor += face.length;
+        }
+        this.renderVertexOffsetsByShared = offsets;
+        this.renderVertexFaceIndex = faceIndexByRenderVertex;
+        this.faceVertexRanges = faceRanges;
+        this.renderVertexSharedIndices = new Array(cursor);
+        for (let faceIndex = 0, cursor2 = 0; faceIndex < this.faces.length; faceIndex++) {
+            const face = this.faces[faceIndex] || [];
+            for (let corner = 0; corner < face.length; corner++) this.renderVertexSharedIndices[cursor2++] = face[corner];
+        }
     }
 
     getVertexIndex(vertex) {
@@ -346,6 +451,7 @@ export class Mesh {
         this.edges = [];
         this.facesOfEdge = new Map();
         this.edgesOfVertex = Array.from({ length: this.positions.length }, () => []);
+        this.facesOfVertex = Array.from({ length: this.positions.length }, () => []);
         const edgesByKey = new Map();
         this.faces.forEach((face, faceIndex) => {
             for (let corner = 0; corner < face.length; corner++) {
@@ -884,14 +990,14 @@ export class Mesh {
             else this.opaqueFaceIndices.push(faceIndex);
         }
         this.instanceBatchKey = null;
-        if (this.transparentFaceIndices.length || this.vertexWeights.size || this.skeleton.bones.length || this.selectedFace >= 0) return;
+        if (this.transparentFaceIndices.length || (this.material.color?.[3] ?? 1) < 1 || this.vertexWeights.size || this.skeleton.bones.length || this.selectedFace >= 0) return;
         const batches = this.getDrawBatches(this.opaqueFaceIndices);
         if (batches.some(batch => batch.texture)) return;
-        this.instanceBatchKey = `${this.geometrySignature}:${this.material.shading}:${JSON.stringify(batches.map(batch => [batch.offset, batch.count, batch.color, batch.transform.scale, batch.transform.offset, batch.transform.rotation, batch.transform.flipX, batch.transform.flipY, batch.uvCenter]))}`;
+        this.instanceBatchKey = `${this.geometrySignature}:${this.material.shading}:${this.material.doubleSided ? 1 : 0}:${this.material.useTexture ? 1 : 0}:${JSON.stringify(batches.map(batch => batch.color))}:${JSON.stringify(batches.map(batch => [batch.offset, batch.count, batch.transform.scale, batch.transform.offset, batch.transform.rotation, batch.transform.flipX, batch.transform.flipY, batch.uvCenter]))}`;
     }
 
     getInstanceBatchKey() {
-        if (this.selectedFace >= 0 || this.vertexWeights.size || this.skeleton.bones.length || this.transparentFaceIndices.length) return null;
+        if (this.selectedFace >= 0 || (this.material.color?.[3] ?? 1) < 1 || this.vertexWeights.size || this.skeleton.bones.length || this.transparentFaceIndices.length) return null;
         return this.instanceBatchKey ? `${this.instanceBatchKey}:${this.shadowedFaces.join('')}` : null;
     }
 
@@ -1001,7 +1107,7 @@ export class Mesh {
         const transforms = this.skeleton.getWorldTransforms();
         const bindTransforms = this.skeleton.getWorldTransforms(true);
         const normals = [];
-        this.faces.forEach(face => {
+        this.faces.forEach((face, faceIndex) => {
             const positions = face.map(vertexIndex => this.getDeformedPoint(vertexIndex, transforms, bindTransforms));
             const edgeA = positions[1]?.map((value, axis) => value - positions[0][axis]) || [0, 0, 0];
             const edgeB = positions[2]?.map((value, axis) => value - positions[0][axis]) || [0, 0, 0];
@@ -1055,13 +1161,156 @@ export class Mesh {
     }
 
     setVertexPosition(sharedVertexIndex, position) {
+        if (!Number.isInteger(sharedVertexIndex) || !this.positions[sharedVertexIndex]) return false;
+        const wasFast = this._fastVertexEditDepth > 0;
+        if (!wasFast) this.beginVertexEdit();
         const vertex = this.positions[sharedVertexIndex];
-        if (!vertex) return;
-        vertex.splice(0, 3, ...position);
+        this._suppressFastDirty = true;
+        vertex[0] = Number(position[0]) || 0;
+        vertex[1] = Number(position[1]) || 0;
+        vertex[2] = Number(position[2]) || 0;
+        this._suppressFastDirty = false;
         const skin = this.vertexWeights.get(sharedVertexIndex);
-        if (skin) skin.bindPosition = [...position];
-        this.rebuildRenderData();
+        if (skin) skin.bindPosition = [...vertex];
+        this._fastModifiedVertices.add(sharedVertexIndex);
+        if (!wasFast) this.endVertexEdit();
         return true;
+    }
+
+    beginVertexEdit() {
+        this._fastVertexEditDepth++;
+        return this;
+    }
+
+    endVertexEdit() {
+        if (this._fastVertexEditDepth > 0) this._fastVertexEditDepth--;
+        if (this._fastVertexEditDepth === 0 && this._fastModifiedVertices.size) {
+            const indices = [...this._fastModifiedVertices];
+            this._fastModifiedVertices.clear();
+            this._applyFastVertexEdits(indices);
+        }
+        return this;
+    }
+
+    translateVertices(sharedIndices, delta) {
+        const indices = [...new Set(sharedIndices || [])].filter(index => Number.isInteger(index) && this.positions[index]);
+        if (!indices.length) return false;
+        const wasFast = this._fastVertexEditDepth > 0;
+        if (!wasFast) this.beginVertexEdit();
+        this._suppressFastDirty = true;
+        for (const sharedVertexIndex of indices) {
+            const vertex = this.positions[sharedVertexIndex];
+            vertex[0] += Number(delta?.[0]) || 0;
+            vertex[1] += Number(delta?.[1]) || 0;
+            vertex[2] += Number(delta?.[2]) || 0;
+            const skin = this.vertexWeights.get(sharedVertexIndex);
+            if (skin) skin.bindPosition = [...vertex];
+            this._fastModifiedVertices.add(sharedVertexIndex);
+        }
+        this._suppressFastDirty = false;
+        if (!wasFast) this.endVertexEdit();
+        return true;
+    }
+
+    _applyFastVertexEdits(sharedIndices) {
+        if (!this.renderVertexSharedIndices || !this.renderVertexOffsetsByShared.length) this._ensureEditMaps();
+        if (!this.renderVertexSharedIndices || !this.renderVertexOffsetsByShared.length) { this.markDirty('geometry'); return; }
+        const affectedFaces = new Set();
+        for (const sharedIndex of sharedIndices) {
+            const offsets = this.renderVertexOffsetsByShared[sharedIndex] || [];
+            const position = this.positions[sharedIndex];
+            for (const renderIndex of offsets) {
+                const base = renderIndex * 3;
+                this.vertices[base] = position[0];
+                this.vertices[base + 1] = position[1];
+                this.vertices[base + 2] = position[2];
+                affectedFaces.add(this.renderVertexFaceIndex?.[renderIndex] ?? -1);
+                this._queueGpuRange(renderIndex, 1);
+            }
+            for (const faceIndex of (this.facesOfVertex?.[sharedIndex] || [])) affectedFaces.add(faceIndex);
+        }
+        for (const faceIndex of affectedFaces) {
+            if (!Number.isInteger(faceIndex) || faceIndex < 0) continue;
+            const range = this.faceVertexRanges[faceIndex];
+            if (!range || range.count < 3) continue;
+            const face = this.faces[faceIndex];
+            const p0 = this.positions[face[0]], p1 = this.positions[face[1]], p2 = this.positions[face[2]];
+            const ax = p1[0] - p0[0], ay = p1[1] - p0[1], az = p1[2] - p0[2];
+            const bx = p2[0] - p0[0], by = p2[1] - p0[1], bz = p2[2] - p0[2];
+            let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+            const len = Math.hypot(nx, ny, nz);
+            if (len > 1e-8) { nx /= len; ny /= len; nz /= len; } else { nx = 0; ny = 1; nz = 0; }
+            const end = range.start + range.count;
+            for (let renderIndex = range.start; renderIndex < end; renderIndex++) {
+                const base = renderIndex * 3;
+                this.normals[base] = nx;
+                this.normals[base + 1] = ny;
+                this.normals[base + 2] = nz;
+            }
+            this._queueGpuRange(range.start, range.count);
+        }
+        this._suppressFastDirty = true;
+        this.geometryRevision++;
+        this._suppressFastDirty = false;
+        this.dirtyFlags.geometry = false;
+        this._boundsDirty = true;
+        this.renderDataRevision = (this.renderDataRevision || 0) + 1;
+        this.geometrySignature = `${this.geometrySignature || 'fast'}:v${this.geometryRevision}`;
+        this.renderStateVersion++;
+        this.instanceBatchKey = null;
+    }
+
+    _queueGpuRange(start, count) {
+        if (!Number.isInteger(start) || count <= 0) return;
+        this._pendingGpuRanges.push([start, count]);
+    }
+
+    flushPendingGeometry(gl) {
+        if (!this._pendingGpuRanges.length || !this.positionBuffer) return false;
+        const ranges = mergeRanges(this._pendingGpuRanges);
+        this._pendingGpuRanges.length = 0;
+        for (const [start, end] of ranges) {
+            const offset = start * 3;
+            const count = end - start;
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
+            gl.bufferSubData(gl.ARRAY_BUFFER, offset * 4, this.vertices.subarray(offset, offset + count * 3));
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.normalBuffer);
+            gl.bufferSubData(gl.ARRAY_BUFFER, offset * 4, this.normals.subarray(offset, offset + count * 3));
+        }
+        return true;
+    }
+
+    refreshBounds() {
+        if (!this._boundsDirty) return;
+        const boundsMin = [Infinity, Infinity, Infinity];
+        const boundsMax = [-Infinity, -Infinity, -Infinity];
+        for (const vertex of this.positions) {
+            if (!vertex) continue;
+            for (let axis = 0; axis < 3; axis++) {
+                const value = Number(vertex[axis]) || 0;
+                if (value < boundsMin[axis]) boundsMin[axis] = value;
+                if (value > boundsMax[axis]) boundsMax[axis] = value;
+            }
+        }
+        this.boundsMin = boundsMin[0] === Infinity ? null : boundsMin;
+        this.boundsMax = boundsMax[0] === -Infinity ? null : boundsMax;
+        if (this.boundsMin && this.boundsMax) {
+            this.boundsCenter = [
+                (boundsMin[0] + boundsMax[0]) * 0.5,
+                (boundsMin[1] + boundsMax[1]) * 0.5,
+                (boundsMin[2] + boundsMax[2]) * 0.5
+            ];
+            let radiusSq = 0;
+            for (const vertex of this.positions) {
+                const dx = vertex[0] - this.boundsCenter[0], dy = vertex[1] - this.boundsCenter[1], dz = vertex[2] - this.boundsCenter[2];
+                radiusSq = Math.max(radiusSq, dx * dx + dy * dy + dz * dz);
+            }
+            this.boundsRadius = Math.sqrt(radiusSq);
+        } else {
+            this.boundsCenter = null;
+            this.boundsRadius = 0;
+        }
+        this._boundsDirty = false;
     }
 
     weldNearbyVertices(faceIndex, vertexIndex, threshold = 0.08) {
@@ -1291,6 +1540,8 @@ export class Mesh {
         this.wireframeIndices = wireframeIndices;
         this.indexType = IndexArray === Uint32Array ? 'UNSIGNED_INT' : 'UNSIGNED_SHORT';
         this.indexBytes = IndexArray === Uint32Array ? 4 : 2;
+        this.indexType = IndexArray === Uint32Array ? 'UNSIGNED_INT' : 'UNSIGNED_SHORT';
+        this.indexBytes = IndexArray === Uint32Array ? 4 : 2;
         this.triangleCount = triangleIndexCount / 3;
         this.boundsMin = boundsMin[0] === Infinity ? null : boundsMin;
         this.boundsMax = boundsMax[0] === -Infinity ? null : boundsMax;
@@ -1313,6 +1564,21 @@ export class Mesh {
             this.boundsRadius = 0;
         }
         this.geometrySignature = `static:${renderVertexCount}:${triangleIndexCount}:${this.faceCount}`;
+        this.renderVertexSharedIndices = [];
+        this.renderVertexOffsetsByShared = Array.from({ length: this.positions.length }, () => []);
+        this.renderVertexFaceIndex = [];
+        this.faceVertexRanges = new Array(faces.length);
+        let staticCursor = 0;
+        for (let faceIndex = 0; faceIndex < faces.length; faceIndex++) {
+            const face = faces[faceIndex] || [];
+            this.faceVertexRanges[faceIndex] = { start: staticCursor, count: face.length };
+            face.forEach(sharedIndex => {
+                this.renderVertexSharedIndices.push(sharedIndex);
+                this.renderVertexOffsetsByShared[sharedIndex]?.push(staticCursor);
+                this.renderVertexFaceIndex.push(faceIndex);
+                staticCursor++;
+            });
+        }
         this.renderStateVersion++;
         this.renderDataRevision = (this.renderDataRevision || 0) + 1;
         this.bakedFaceColorsRevision = this.renderDataRevision;
@@ -1323,74 +1589,96 @@ export class Mesh {
         return true;
     }
 
-    rebuildRenderData() {
+    rebuildRenderData({ buildEditorData = !this.lazyTopology } = {}) {
         if (!this._legacyViewExposed && !this.dirtyFlags.geometry && !this.dirtyFlags.uvs) return false;
         if (this._legacyViewExposed) this._syncTopologyFromPolygonViews();
 
-        const vertices = [];
-        const normals = [];
-        const colors = [];
-        const uvs = [];
-        const indices = [];
-        const wireframeIndices = [];
-        this.faceRanges = [];
-        this.faces.forEach((face, faceIndex) => {
-            const polygon = face.map(vertexIndex => this.positions[vertexIndex]);
-            const vertexStart = vertices.length / 3;
-            const edgeA = polygon[1]?.map((value, axis) => value - polygon[0][axis]) || [0, 0, 0];
-            const edgeB = polygon[2]?.map((value, axis) => value - polygon[0][axis]) || [0, 0, 0];
-            const normal = normalize3(cross3(edgeA, edgeB)) || [0, 1, 0];
-            if (!this.faceUvs[faceIndex]) this.faceUvs[faceIndex] = [];
-            polygon.forEach((vertex, vertexIndex) => {
-                vertices.push(...vertex);
-                const faceColor = this.faceColors[faceIndex] || [1, 1, 1, 1];
-                if (this.bakeFaceColors) colors.push(faceColor[0] ?? 1, faceColor[1] ?? 1, faceColor[2] ?? 1);
-                else colors.push(1, 1, 1);
-                normals.push(...normal);
-                if (!this.faceUvs[faceIndex][vertexIndex]) {
-                    this.faceUvs[faceIndex][vertexIndex] = defaultFaceUV(faceIndex, vertexIndex, this.polygons.length);
-                }
-                uvs.push(...this.faceUvs[faceIndex][vertexIndex]);
-            });
-            for (let vertexIndex = 1; vertexIndex < polygon.length - 1; vertexIndex++) {
-                indices.push(vertexStart, vertexStart + vertexIndex, vertexStart + vertexIndex + 1);
-            }
-            for (let vertexIndex = 0; vertexIndex < polygon.length; vertexIndex++) {
-                wireframeIndices.push(vertexStart + vertexIndex, vertexStart + (vertexIndex + 1) % polygon.length);
-            }
-            this.faceRanges.push({ offset: indices.length - Math.max(0, polygon.length - 2) * 3, count: Math.max(0, polygon.length - 2) * 3 });
-        });
-        this.vertices = new Float32Array(vertices);
-        this.normals = new Float32Array(normals);
-        this.colors = new Float32Array(colors);
-        this.uvs = new Float32Array(uvs);
-        const renderVertexCount = vertices.length / 3;
-        const IndexArray = renderVertexCount > 65535 ? Uint32Array : Uint16Array;
-        this.indices = new IndexArray(indices);
-        this.wireframeIndices = new IndexArray(wireframeIndices);
-        this.triangleCount = indices.length / 3;
-        const boundsMin = [Infinity, Infinity, Infinity];
-        const boundsMax = [-Infinity, -Infinity, -Infinity];
-        this.positions.forEach(vertex => vertex.forEach((value, axis) => {
-            boundsMin[axis] = Math.min(boundsMin[axis], value);
-            boundsMax[axis] = Math.max(boundsMax[axis], value);
-        }));
-        this.boundsMin = boundsMin[0] === Infinity ? null : boundsMin;
-        this.boundsMax = boundsMax[0] === -Infinity ? null : boundsMax;
-        if (this.boundsMin && this.boundsMax) {
-            this.boundsCenter = this.boundsMin.map((value, axis) => (value + this.boundsMax[axis]) * 0.5);
-            this.boundsRadius = 0;
-            this.positions.forEach(vertex => {
-                this.boundsRadius = Math.max(this.boundsRadius, Math.hypot(
-                    vertex[0] - this.boundsCenter[0],
-                    vertex[1] - this.boundsCenter[1],
-                    vertex[2] - this.boundsCenter[2]
-                ));
-            });
-        } else {
-            this.boundsCenter = null;
-            this.boundsRadius = 0;
+        let cornerCount = 0;
+        let triangleIndexCount = 0;
+        for (const face of this.faces) {
+            const count = face?.length || 0;
+            cornerCount += count;
+            triangleIndexCount += Math.max(0, count - 2) * 3;
         }
+        const vertices = new Float32Array(cornerCount * 3);
+        const normals = new Float32Array(cornerCount * 3);
+        const colors = new Float32Array(cornerCount * 3);
+        const uvs = new Float32Array(cornerCount * 2);
+        const IndexArray = cornerCount > 65535 ? Uint32Array : Uint16Array;
+        const indices = new IndexArray(triangleIndexCount);
+        const wireframeIndices = new IndexArray(cornerCount * 2);
+        this.faceRanges = new Array(this.faces.length);
+        this.faceVertexRanges = buildEditorData ? new Array(this.faces.length) : [];
+        const renderVertexSharedIndices = buildEditorData ? new Array(cornerCount) : null;
+        const renderVertexOffsetsByShared = buildEditorData ? Array.from({ length: this.positions.length }, () => []) : [];
+        const renderVertexFaceIndex = buildEditorData ? new Array(cornerCount) : null;
+        let vertexCursor = 0, indexCursor = 0, wireCursor = 0;
+        for (let faceIndex = 0; faceIndex < this.faces.length; faceIndex++) {
+            const face = this.faces[faceIndex] || [];
+            const vertexStart = vertexCursor / 3;
+            const first = face[0];
+            const second = face[1];
+            const third = face[2];
+            const p0 = this.positions[first] || [0, 0, 0];
+            const p1 = this.positions[second] || p0;
+            const p2 = this.positions[third] || p0;
+            const ax = p1[0] - p0[0], ay = p1[1] - p0[1], az = p1[2] - p0[2];
+            const bx = p2[0] - p0[0], by = p2[1] - p0[1], bz = p2[2] - p0[2];
+            let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+            const nlen = Math.hypot(nx, ny, nz);
+            if (nlen > 1e-8) { nx /= nlen; ny /= nlen; nz /= nlen; } else { nx = 0; ny = 1; nz = 0; }
+            let faceUvs = this.faceUvs[faceIndex];
+            if (!faceUvs) { this.faceUvs[faceIndex] = []; faceUvs = this.faceUvs[faceIndex]; }
+            const faceColor = this.faceColors[faceIndex] || [1, 1, 1, 1];
+            for (let corner = 0; corner < face.length; corner++) {
+                const sharedIndex = face[corner];
+                const vertex = this.positions[sharedIndex] || [0, 0, 0];
+                vertices[vertexCursor++] = vertex[0] || 0;
+                vertices[vertexCursor++] = vertex[1] || 0;
+                vertices[vertexCursor++] = vertex[2] || 0;
+                normals[vertexCursor - 3] = nx; normals[vertexCursor - 2] = ny; normals[vertexCursor - 1] = nz;
+                if (this.bakeFaceColors) {
+                    colors[(vertexCursor - 3) / 3 * 3] = faceColor[0] ?? 1;
+                    colors[(vertexCursor - 3) / 3 * 3 + 1] = faceColor[1] ?? 1;
+                    colors[(vertexCursor - 3) / 3 * 3 + 2] = faceColor[2] ?? 1;
+                } else {
+                    colors[(vertexCursor - 3) / 3 * 3] = 1; colors[(vertexCursor - 3) / 3 * 3 + 1] = 1; colors[(vertexCursor - 3) / 3 * 3 + 2] = 1;
+                }
+                const uv = faceUvs[corner] || defaultFaceUV(faceIndex, corner, face.length || 1);
+                if (!faceUvs[corner]) faceUvs[corner] = uv;
+                const uvBase = ((vertexCursor / 3) - 1) * 2;
+                uvs[uvBase] = uv[0] ?? 0; uvs[uvBase + 1] = uv[1] ?? 0;
+                const renderIndex = (vertexCursor / 3) - 1;
+                if (buildEditorData) {
+                    renderVertexSharedIndices[renderIndex] = sharedIndex;
+                    renderVertexOffsetsByShared[sharedIndex]?.push(renderIndex);
+                    renderVertexFaceIndex[renderIndex] = faceIndex;
+                }
+            }
+            for (let corner = 1; corner < face.length - 1; corner++) {
+                indices[indexCursor++] = vertexStart;
+                indices[indexCursor++] = vertexStart + corner;
+                indices[indexCursor++] = vertexStart + corner + 1;
+            }
+            for (let corner = 0; corner < face.length; corner++) {
+                wireframeIndices[wireCursor++] = vertexStart + corner;
+                wireframeIndices[wireCursor++] = vertexStart + ((corner + 1) % face.length);
+            }
+            this.faceRanges[faceIndex] = { offset: indexCursor - Math.max(0, face.length - 2) * 3, count: Math.max(0, face.length - 2) * 3 };
+            if (buildEditorData) this.faceVertexRanges[faceIndex] = { start: vertexStart, count: face.length };
+        }
+        this.vertices = vertices;
+        this.normals = normals;
+        this.colors = colors;
+        this.uvs = uvs;
+        this.indices = indices;
+        this.wireframeIndices = wireframeIndices;
+        this.renderVertexSharedIndices = renderVertexSharedIndices;
+        this.renderVertexOffsetsByShared = renderVertexOffsetsByShared;
+        this.renderVertexFaceIndex = renderVertexFaceIndex;
+        this.triangleCount = triangleIndexCount / 3;
+        if (buildEditorData) this._rebuildTopologyAdjacency();
+        if (this._boundsDirty || !this.boundsMin) this.refreshBounds();
         this.geometrySignature = hashGeometry(this.vertices, this.indices);
         this.faceCount = this.faces.length;
         this.allFaceIndices = Array.from({ length: this.faceCount }, (_, faceIndex) => faceIndex);
@@ -1398,13 +1686,14 @@ export class Mesh {
         while (this.faceTextures.length < this.faceCount) this.faceTextures.push(null);
         while (this.faceTextureIds.length < this.faceCount) this.faceTextureIds.push(null);
         while (this.faceUvTransforms.length < this.faceCount) this.faceUvTransforms.push({ scale: [1, 1], offset: [0, 0], rotation: 0, flipX: false, flipY: false });
-        this._rebuildTopologyAdjacency();
-        this._refreshPolygonViews();
         this.updateRenderQueues();
         if (this.vao) this.invalidateBuffers();
         this.dirtyFlags.geometry = false;
         this.dirtyFlags.uvs = false;
         this.renderDataRevision = (this.renderDataRevision || 0) + 1;
+        this._pendingGpuRanges.length = 0;
+        if (!this.lazyTopology) this._refreshPolygonViews();
+        this._boundsDirty = false;
         return true;
     }
 
@@ -1528,6 +1817,8 @@ export class Mesh {
 
     draw(gl, program, faceIndices = null, frameToken = undefined, renderMode = 'anime', stats = null) {
         this.initBuffers(gl, program);
+        this.flushPendingGeometry(gl);
+        this.refreshBounds();
 
         if (gl.createVertexArray) {
             gl.bindVertexArray(this.vao);
@@ -1699,6 +1990,17 @@ export class Mesh {
 
 const DEFAULT_UV_CENTER = [0.5, 0.5];
 
+function observeTransformArray(value, onChange) {
+    const target = Array.isArray(value) ? [Number(value[0]) || 0, Number(value[1]) || 0, Number(value[2]) || 0] : [0, 0, 0];
+    return new Proxy(target, {
+        set(array, property, next, receiver) {
+            const result = Reflect.set(array, property, Number(next) || 0, receiver);
+            onChange();
+            return result;
+        }
+    });
+}
+
 function observeArrays(value, onChange) {
     return Array.isArray(value) ? observeArray(value, onChange) : value;
 }
@@ -1782,6 +2084,19 @@ function sameFaceState(batch, texture, color, transform, uvCenter, uvCenterRelev
         && batch.transform.offset[1] === transform.offset[1]
         && batch.uvCenterRelevant === uvCenterRelevant
         && (!uvCenterRelevant || (batch.uvCenter[0] === uvCenter[0] && batch.uvCenter[1] === uvCenter[1]));
+}
+
+function mergeRanges(ranges) {
+    if (!ranges.length) return [];
+    const sorted = ranges.slice().sort((a, b) => a[0] - b[0]);
+    const merged = [];
+    for (const [start, count] of sorted) {
+        const end = start + count;
+        const last = merged[merged.length - 1];
+        if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+        else merged.push([start, end]);
+    }
+    return merged;
 }
 
 function defaultFaceUV(faceIndex, vertexIndex, faceCount) {

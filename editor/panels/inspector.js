@@ -26,7 +26,7 @@ export function createInspectorPanel(gl, textureLibrary, onSelectFace, onHistory
         input.type = 'number';
         input.step = step;
         input.value = value;
-        input.addEventListener('input', () => { onHistory(); onInput(Number(input.value) || 0); });
+        input.addEventListener('change', () => { onHistory(); onInput(Number(input.value) || 0); });
         group.appendChild(input);
         return group;
     }
@@ -46,7 +46,7 @@ export function createInspectorPanel(gl, textureLibrary, onSelectFace, onHistory
             input.type = 'number';
             input.step = '0.1';
             input.value = degrees ? (value * 180 / Math.PI).toFixed(1) : value;
-            input.addEventListener('input', () => {
+            input.addEventListener('change', () => {
                 onHistory();
                 const nextValue = Number(input.value) || 0;
                 onInput(index, degrees ? nextValue * Math.PI / 180 : nextValue);
@@ -124,6 +124,8 @@ export function createInspectorPanel(gl, textureLibrary, onSelectFace, onHistory
             return;
         }
 
+        const faceCount = currentMesh.faceCount || currentMesh.faces.length;
+        currentFace = Math.max(0, Math.min(faceCount - 1, currentFace || 0));
         const rigInfo = document.createElement('div');
         rigInfo.className = 'inspector-empty';
         rigInfo.textContent = `Rig: ${currentMesh.skeleton.bones.length} bone${currentMesh.skeleton.bones.length === 1 ? '' : 's'}${currentMesh.animationPlayer.playing ? ' - playing' : ''}`;
@@ -133,58 +135,116 @@ export function createInspectorPanel(gl, textureLibrary, onSelectFace, onHistory
         faceTitle.className = 'face-title';
         faceTitle.textContent = `Editing ${faceNames[currentFace] || `Face ${currentFace + 1}`} face`;
         info.appendChild(faceTitle);
-        const faceButtons = document.createElement('div');
-        faceButtons.className = 'face-buttons';
-        currentMesh.polygons.forEach((polygon, index) => {
-            const button = document.createElement('button');
-            button.className = 'face-button' + (index === currentFace ? ' selected' : '');
-            button.type = 'button';
-            button.textContent = faceNames[index] || `Face ${index + 1}`;
-            button.addEventListener('click', () => {
-                currentFace = index;
-                onSelectFace(index);
-                renderFaceEditor();
-            });
-            faceButtons.appendChild(button);
-        });
-        info.appendChild(faceButtons);
+        const faceNavigator = document.createElement('div');
+        faceNavigator.className = 'navigator-row';
+        const previousFace = document.createElement('button');
+        previousFace.type = 'button';
+        previousFace.textContent = '‹';
+        previousFace.title = 'Previous face';
+        previousFace.disabled = faceCount < 2;
+        const faceInput = document.createElement('input');
+        faceInput.className = 'editor-input navigator-index';
+        faceInput.type = 'number';
+        faceInput.min = '1';
+        faceInput.max = String(Math.max(1, faceCount));
+        faceInput.value = String(currentFace + 1);
+        const nextFace = document.createElement('button');
+        nextFace.type = 'button';
+        nextFace.textContent = '›';
+        nextFace.title = 'Next face';
+        nextFace.disabled = faceCount < 2;
+        const faceCountLabel = document.createElement('span');
+        faceCountLabel.className = 'navigator-count';
+        faceCountLabel.textContent = `/ ${faceCount}`;
+        const setFace = index => {
+            currentFace = Math.max(0, Math.min(faceCount - 1, index));
+            onSelectFace(currentFace);
+            renderFaceEditor();
+        };
+        previousFace.addEventListener('click', () => setFace(currentFace - 1));
+        nextFace.addEventListener('click', () => setFace(currentFace + 1));
+        faceInput.addEventListener('change', () => setFace((Number(faceInput.value) || 1) - 1));
+        faceNavigator.append(previousFace, faceInput, faceCountLabel, nextFace);
+        info.appendChild(faceNavigator);
+
+        const vertexCount = Math.floor(currentMesh.positions.length);
+        let currentVertexIndex = currentMesh.selectedVertex
+            ? currentMesh.faces[currentMesh.selectedVertex.faceIndex]?.[currentMesh.selectedVertex.vertexIndex]
+            : currentMesh.faces[currentFace]?.[0];
+        currentVertexIndex = Number.isInteger(currentVertexIndex)
+            ? currentVertexIndex
+            : 0;
+        currentVertexIndex = Math.max(0, Math.min(Math.max(0, vertexCount - 1), currentVertexIndex));
 
         const sharedVertexTitle = document.createElement('div');
         sharedVertexTitle.className = 'panel-title';
-        sharedVertexTitle.textContent = `Shared vertices (${currentMesh.positions.length})`;
+        sharedVertexTitle.textContent = `Shared vertices (${vertexCount})`;
         info.appendChild(sharedVertexTitle);
-        currentMesh.positions.forEach((vertexValue, vertexIndex) => {
-            const vertex = document.createElement('div');
-            vertex.className = 'field-group';
+        const vertexNavigator = document.createElement('div');
+        vertexNavigator.className = 'navigator-row';
+        const previousVertex = document.createElement('button');
+        previousVertex.type = 'button';
+        previousVertex.textContent = '‹';
+        previousVertex.disabled = vertexCount < 2;
+        const vertexInput = document.createElement('input');
+        vertexInput.className = 'editor-input navigator-index';
+        vertexInput.type = 'number';
+        vertexInput.min = '1';
+        vertexInput.max = String(Math.max(1, vertexCount));
+        vertexInput.value = String(currentVertexIndex + 1);
+        const nextVertex = document.createElement('button');
+        nextVertex.type = 'button';
+        nextVertex.textContent = '›';
+        nextVertex.disabled = vertexCount < 2;
+        const vertexCountLabel = document.createElement('span');
+        vertexCountLabel.className = 'navigator-count';
+        vertexCountLabel.textContent = `/ ${vertexCount}`;
+        let vertexFields = null;
+        const setVertex = index => {
+            currentVertexIndex = Math.max(0, Math.min(vertexCount - 1, index));
+            vertexInput.value = String(currentVertexIndex + 1);
+            if (vertexFields) renderVertexFields();
+        };
+        previousVertex.addEventListener('click', () => setVertex(currentVertexIndex - 1));
+        nextVertex.addEventListener('click', () => setVertex(currentVertexIndex + 1));
+        vertexInput.addEventListener('change', () => setVertex((Number(vertexInput.value) || 1) - 1));
+        vertexNavigator.append(previousVertex, vertexInput, vertexCountLabel, nextVertex);
+        info.appendChild(vertexNavigator);
+
+        vertexFields = document.createElement('div');
+        vertexFields.className = 'vertex-editor-fields';
+        info.appendChild(vertexFields);
+        function renderVertexFields() {
+            vertexFields.replaceChildren();
+            const value = currentMesh.positions[currentVertexIndex] || [0, 0, 0];
             const label = document.createElement('div');
             label.className = 'field-label';
-            label.textContent = `Vertex ${vertexIndex + 1}`;
-            vertex.appendChild(label);
+            label.textContent = `Vertex ${currentVertexIndex + 1}`;
+            vertexFields.appendChild(label);
             const fields = document.createElement('div');
             fields.className = 'vector-fields';
             for (let axis = 0; axis < 3; axis++) {
-                const value = vertexValue[axis];
                 const input = document.createElement('input');
                 input.className = 'editor-input';
                 input.type = 'number';
                 input.step = '0.05';
-                input.value = value;
-                input.addEventListener('input', () => {
-                    onHistory();
-                    const position = [...currentMesh.positions[vertexIndex]];
+                input.value = value[axis];
+                input.addEventListener('change', () => {
+                    const position = [...(currentMesh.positions[currentVertexIndex] || [0, 0, 0])];
                     position[axis] = Number(input.value) || 0;
-                    currentMesh.setVertexPosition(vertexIndex, position);
+                    currentMesh.setVertexPosition(currentVertexIndex, position);
+                    onHistory();
                 });
                 fields.appendChild(input);
             }
-            vertex.appendChild(fields);
-            info.appendChild(vertex);
-        });
+            vertexFields.appendChild(fields);
+        }
+        renderVertexFields();
 
         const name = document.createElement('input');
         name.className = 'editor-input field-group';
         name.value = currentMesh.name;
-        name.addEventListener('input', () => { onHistory(); currentMesh.name = name.value || 'Mesh'; });
+        name.addEventListener('change', () => { onHistory(); currentMesh.name = name.value || 'Mesh'; });
         info.appendChild(name);
         const shading = document.createElement('select');
         shading.className = 'editor-input field-group';
@@ -207,9 +267,9 @@ export function createInspectorPanel(gl, textureLibrary, onSelectFace, onHistory
             currentMesh.material.doubleSided = checked;
             currentMesh.updateRenderQueues();
         }));
-        addVectorField('Position', currentMesh.position, (index, value) => { currentMesh.position[index] = value; });
-        addVectorField('Rotation', currentMesh.rotation, (index, value) => { currentMesh.rotation[index] = value; }, true);
-        addVectorField('Scale', currentMesh.scale, (index, value) => { currentMesh.scale[index] = value; });
+        addVectorField('Position', currentMesh.position, (index, value) => { currentMesh.position[index] = value; currentMesh.transformRevision = (currentMesh.transformRevision || 0) + 1; currentMesh._modelMatrixCacheRevision = -1; });
+        addVectorField('Rotation', currentMesh.rotation, (index, value) => { currentMesh.rotation[index] = value; currentMesh.transformRevision = (currentMesh.transformRevision || 0) + 1; currentMesh._modelMatrixCacheRevision = -1; }, true);
+        addVectorField('Scale', currentMesh.scale, (index, value) => { currentMesh.scale[index] = value; currentMesh.transformRevision = (currentMesh.transformRevision || 0) + 1; currentMesh._modelMatrixCacheRevision = -1; });
 
         const colorGroup = document.createElement('div');
         colorGroup.className = 'field-group';
@@ -222,9 +282,9 @@ export function createInspectorPanel(gl, textureLibrary, onSelectFace, onHistory
         const color = document.createElement('input');
         color.className = 'color-input';
         color.type = 'color';
-        const faceColor = currentMesh.faceColors[currentFace];
+        const faceColor = currentMesh.faceColors[currentFace] || [1, 1, 1, 1];
         color.value = '#' + faceColor.slice(0, 3).map(value => Math.round(value * 255).toString(16).padStart(2, '0')).join('');
-        color.addEventListener('input', () => {
+        color.addEventListener('change', () => {
             onHistory();
             const alpha = faceColor[3] ?? 1;
             const rgb = [1, 3, 5].map(offset => parseInt(color.value.slice(offset, offset + 2), 16) / 255);
@@ -251,12 +311,13 @@ export function createInspectorPanel(gl, textureLibrary, onSelectFace, onHistory
         const opacityValue = document.createElement('output');
         opacityValue.className = 'range-value';
         opacityValue.textContent = `${Math.round(Number(opacity.value) * 100)}%`;
-        opacity.addEventListener('input', () => {
+        opacity.addEventListener('change', () => {
             onHistory();
             faceColor[3] = Number(opacity.value);
             currentMesh.updateRenderQueues();
             opacityValue.textContent = `${Math.round(Number(opacity.value) * 100)}%`;
         });
+        opacity.addEventListener('input', () => { opacityValue.textContent = `${Math.round(Number(opacity.value) * 100)}%`; });
         opacityGroup.append(opacity, opacityValue);
         info.appendChild(opacityGroup);
 

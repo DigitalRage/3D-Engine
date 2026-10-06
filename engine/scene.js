@@ -1,11 +1,16 @@
 import { DirectionalLight } from './light.js';
-import { createDefaultAudioSceneConfig } from './audio.js';
+import { createDefaultAudioSceneConfig } from './audioConfig.js';
 
 export class Scene {
     constructor() {
         this.dirtyFlags = { geometry: true, light: true };
         this.geometryRevision = 0;
         this.lightRevision = 0;
+        this.renderRevision = 0;
+        this._bulkMeshMutation = false;
+        this._animatedMeshes = [];
+        this._animatedRevision = -1;
+        this._meshHooksInstalled = new WeakSet();
         this.name = 'Untitled Scene';
         this.assetId = null;
         this.meshes = [];
@@ -15,8 +20,15 @@ export class Scene {
 
     get meshes() { return this._meshes; }
     set meshes(value) {
-        this._meshes = observeArray(value, () => this.markDirty('geometry'));
+        const next = Array.isArray(value) ? value : [];
+        this._meshes = observeArray(next, () => {
+            if (this._bulkMeshMutation) return;
+            this.markDirty('geometry');
+            this.renderRevision++;
+        });
+        for (const mesh of next) mesh?.attachScene?.(this);
         this.markDirty('geometry');
+        this.renderRevision++;
     }
 
     get light() { return this._light; }
@@ -30,6 +42,7 @@ export class Scene {
         this.dirtyFlags[flag] = true;
         if (flag === 'geometry') this.geometryRevision++;
         if (flag === 'light') this.lightRevision++;
+        this.renderRevision++;
     }
 
     consumeDirtyFlags() {
@@ -39,11 +52,36 @@ export class Scene {
     }
 
     add(mesh) {
+        if (!mesh) return;
+        mesh.attachScene?.(this);
         this.meshes.push(mesh);
+        this.renderRevision++;
+    }
+
+    addMany(meshes) {
+        const list = Array.isArray(meshes) ? meshes.filter(Boolean) : [];
+        if (!list.length) return [];
+        this._bulkMeshMutation = true;
+        try {
+            for (const mesh of list) mesh.attachScene?.(this);
+            this._meshes.push(...list);
+        } finally {
+            this._bulkMeshMutation = false;
+        }
+        this.markDirty('geometry');
+        this.renderRevision++;
+        return list;
     }
 
     remove(mesh) {
+        if (!mesh) return;
+        mesh.attachScene?.(null);
         this.meshes = this.meshes.filter(m => m !== mesh);
+        this.renderRevision++;
+    }
+
+    markRenderDirty() {
+        this.renderRevision++;
     }
 
     move(mesh, index) {
@@ -57,7 +95,11 @@ export class Scene {
     }
 
     update(dt) {
-        this.meshes.forEach(mesh => mesh.animationPlayer?.update(dt));
+        if (this._animatedRevision !== this.renderRevision) {
+            this._animatedMeshes = this.meshes.filter(mesh => mesh.animationPlayer?.playing && mesh.animationPlayer?.clip);
+            this._animatedRevision = this.renderRevision;
+        }
+        for (const mesh of this._animatedMeshes) mesh.animationPlayer.update(dt);
     }
 }
 

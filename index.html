@@ -2,7 +2,18 @@
 <html>
 <head>
     <title>Flat Shaded 3D Engine</title>
+    <link rel="modulepreload" href="./main.js">
+    <link rel="preload" href="./engine/shaders/flat.vert" as="fetch" crossorigin>
+    <link rel="preload" href="./engine/shaders/flat.frag" as="fetch" crossorigin>
     <style>
+        #loading-screen { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; background: #0b1018; color: #e8eef7; font: 14px/1.4 system-ui, sans-serif; transition: opacity .35s ease, visibility .35s ease; }
+        #loading-screen.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+        #loading-card { min-width: min(420px, calc(100vw - 40px)); padding: 24px; border: 1px solid #29384a; border-radius: 12px; background: rgba(16, 24, 34, .95); box-shadow: 0 18px 60px rgba(0,0,0,.45); }
+        #loading-title { font-weight: 700; font-size: 18px; letter-spacing: .02em; }
+        #loading-status { margin-top: 8px; color: #9fb0c2; min-height: 20px; }
+        #loading-progress { margin-top: 18px; height: 6px; border-radius: 999px; overflow: hidden; background: #1d2835; }
+        #loading-progress-fill { height: 100%; width: 0; background: #5fb3ff; transition: width .12s ease; }
+        #loading-percent { position: fixed; right: 16px; bottom: 12px; font-variant-numeric: tabular-nums; color: #cbd8e5; font-size: 12px; }
         body { margin: 0; overflow: hidden; background: #1a1a26; }
         #viewport { width: 100vw; height: 100vh; display: block; background: #1a1a26; }
         #viewport-overlay { position: fixed; inset: 0; z-index: 2; width: 100vw; height: 100vh; pointer-events: none; }
@@ -10,6 +21,7 @@
     </style>
 </head>
 <body>
+    <div id="loading-screen" role="status" aria-live="polite"><div id="loading-card"><div id="loading-title">Flat Shaded 3D Engine</div><div id="loading-status">Starting renderer</div><div id="loading-progress"><div id="loading-progress-fill"></div></div></div><div id="loading-percent">0%</div></div>
     <canvas id="viewport"></canvas>
     <canvas id="viewport-overlay" aria-hidden="true"></canvas>
     <div id="ui-root"></div>
