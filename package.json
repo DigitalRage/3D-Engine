@@ -1,0 +1,10 @@
+{
+  "name": "salvage-studio",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Standalone WebGL2 world editor and game runtime with no external runtime dependencies.",
+  "scripts": {
+    "check": "node --check main.js",
+    "serve": "python3 -m http.server 4173"
+  }
+}

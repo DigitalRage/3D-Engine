@@ -1,41 +1,104 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
-    <title>Flat Shaded 3D Engine</title>
-    <link rel="modulepreload" href="./main.js">
-    <style>
-        #loading-screen { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; background: #0b1018; color: #e8eef7; font: 14px/1.4 system-ui, sans-serif; transition: opacity .35s ease, visibility .35s ease; }
-        #loading-screen.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
-        #loading-card { min-width: min(420px, calc(100vw - 40px)); padding: 24px; border: 1px solid #29384a; border-radius: 12px; background: rgba(16, 24, 34, .95); box-shadow: 0 18px 60px rgba(0,0,0,.45); }
-        #loading-title { font-weight: 700; font-size: 18px; letter-spacing: .02em; }
-        #loading-status { margin-top: 8px; color: #9fb0c2; min-height: 20px; }
-        #loading-progress { margin-top: 18px; height: 6px; border-radius: 999px; overflow: hidden; background: #1d2835; }
-        #loading-progress-fill { height: 100%; width: 0; background: #5fb3ff; transition: width .12s ease; }
-        #loading-percent { position: fixed; right: 16px; bottom: 12px; font-variant-numeric: tabular-nums; color: #cbd8e5; font-size: 12px; }
-        body { margin: 0; overflow: hidden; background: #1a1a26; }
-        #viewport { width: 100vw; height: 100vh; display: block; background: #1a1a26; }
-        #viewport-overlay { position: fixed; inset: 0; z-index: 2; width: 100vw; height: 100vh; pointer-events: none; }
-        #ui-root { position: absolute; top: 0; left: 0; right: 0; pointer-events: none; }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Salvage Studio · World Editor</title>
+  <link rel="stylesheet" href="./src/editor.css">
+
 </head>
 <body>
-    <div id="loading-screen" role="status" aria-live="polite"><div id="loading-card"><div id="loading-title">Flat Shaded 3D Engine</div><div id="loading-status">Starting renderer</div><div id="loading-progress"><div id="loading-progress-fill"></div></div></div><div id="loading-percent">0%</div></div>
-    <canvas id="viewport"></canvas>
-    <canvas id="viewport-overlay" aria-hidden="true"></canvas>
-    <div id="ui-root"></div>
-    <script type="application/json" id="embedded-sound-manifest">{
-  "version": 1,
-  "assets": [
-    {
-      "id": "hic-svnt-leones-loop",
-      "name": "Hic Svnt Leones Loop",
-      "path": "Hic Svnt Leones Loop.ogg",
-      "loopable": true,
-      "tags": [],
-      "volume": 1
-    }
-  ]
-}</script>
-    <script type="module" src="./main.js"></script>
+  <div id="app-shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">S</span><div><strong>Salvage Studio</strong><small>World Editor</small></div></div>
+      <nav class="primary-tools" aria-label="Editor tools">
+        <button data-tool="select" class="tool active">Select <kbd>Q</kbd></button>
+        <button data-tool="move" class="tool">Move <kbd>W</kbd></button>
+        <button data-tool="rotate" class="tool">Rotate <kbd>E</kbd></button>
+        <button data-tool="scale" class="tool">Scale <kbd>R</kbd></button>
+      </nav>
+      <div class="top-actions">
+        <button id="new-scene">New Scene</button>
+        <button id="undo">↶ Undo</button>
+        <button id="redo">↷ Redo</button>
+        <button id="import-scene">Import</button>
+        <button id="save-scene">Export</button>
+        <button id="map-toggle">Map</button>
+        <button id="play" class="play">▶ Play</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="panel hierarchy-panel">
+        <div class="panel-title"><span>Scene</span><span id="scene-count">0 objects</span></div>
+        <div class="hierarchy-actions">
+          <button id="add-object">＋ Add</button>
+          <button id="focus-selection">◎ Focus</button>
+        </div>
+        <div id="hierarchy" class="tree"></div>
+      </aside>
+
+      <section class="viewport-wrap">
+        <div id="viewport-stage" class="viewport-stage">
+          <canvas id="viewport"></canvas>
+          <div id="viewport-help" class="viewport-help">Drag: orbit · Shift+drag: pan · Wheel: zoom</div>
+          <div id="play-hud" class="play-hud hidden">
+            <div><span class="hud-kicker">MISSION</span><strong id="hud-objective">Explore the world</strong></div>
+            <div class="hud-row"><span>WASD</span> Move <span>Shift</span> Sprint <span>Space</span> Jump <span>Esc</span> Editor</div>
+            <div class="hud-row"><span id="hud-zone">Central Plaza</span><span id="hud-speed">0.0 m/s</span><span id="hud-fps">-- FPS</span></div>
+          </div>
+          <div id="editor-status" class="status-pill">Editor ready</div>
+        </div>
+        <footer class="viewport-footer">
+          <span id="renderer-status">Initializing renderer…</span>
+          <span id="performance-status">CPU -- · GPU -- · Draws --</span>
+          <span id="world-status">World 0 × 0</span>
+        </footer>
+      </section>
+
+      <aside class="panel inspector-panel">
+        <div class="panel-title"><span>Inspector</span><span id="selection-label">Nothing selected</span></div>
+        <div id="inspector" class="inspector"></div>
+      </aside>
+    </main>
+
+    <div id="create-menu" class="floating-menu hidden">
+      <div class="floating-title">Create Object</div>
+      <button data-create="box">▦ Box</button>
+      <button data-create="sphere">● Sphere</button>
+      <button data-create="capsule">◐ Capsule</button>
+      <button data-create="cylinder">⬢ Cylinder</button>
+      <button data-create="cone">△ Cone</button>
+      <button data-create="torus">◎ Torus</button>
+      <button data-create="plane">▱ Plane</button>
+      <button data-create="empty">◇ Empty</button>
+      <button data-create="light">☼ Sun Light</button>
+    </div>
+
+    <div id="welcome" class="modal">
+      <div class="welcome-card">
+        <div class="brand brand-large"><span class="brand-mark">S</span><div><strong>Salvage Studio</strong><small>Fresh engine base · full game workflow</small></div></div>
+        <h1>A new editor, built on a faster foundation.</h1>
+        <p>PlayCanvas powers the renderer. This editor adds a focused world-building workflow, a large procedural exploration map, a third-person character, scene hierarchy, transform tools, and a runtime mode.</p>
+        <div class="welcome-grid">
+          <div><strong>Fast path</strong><span>WebGPU first, WebGL2 fallback</span></div>
+          <div><strong>World building</strong><span>Streaming-ready sectors + batching</span></div>
+          <div><strong>Gameplay</strong><span>Camera, movement, animation, HUD</span></div>
+        </div>
+        <button id="enter-editor" class="primary big">Open Editor</button>
+      </div>
+    </div>
+
+    <div id="map-modal" class="map-modal hidden">
+      <div class="map-card">
+        <div class="map-head"><div><strong>World Map</strong><span id="map-subtitle">Salvage Frontier</span></div><button id="map-close">Close</button></div>
+        <canvas id="world-map" width="860" height="560"></canvas>
+        <div class="map-legend"><span><i class="legend-player"></i> You</span><span><i class="legend-zone"></i> Zone</span><span><i class="legend-road"></i> Road</span><span><i class="legend-river"></i> River</span></div>
+      </div>
+    </div>
+    <input id="scene-file" type="file" accept="application/json" hidden>
+    <div id="toast" class="toast"></div>
+  </div>
+  <script src="./main.js"></script>
 </body>
 </html>

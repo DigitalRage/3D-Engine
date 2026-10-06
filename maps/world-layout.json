@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "Salvage Frontier",
+  "sectorSize": 64,
+  "zones": [
+    {"name":"Central Plaza","center":[0,0],"role":"hub"},
+    {"name":"Old Town","center":[-82,0],"role":"historic"},
+    {"name":"Pine Valley","center":[-10,90],"role":"forest"},
+    {"name":"Red Mesa","center":[110,-78],"role":"badlands"},
+    {"name":"Ancient Ruins","center":[-86,110],"role":"ruins"},
+    {"name":"North Outpost","center":[118,84],"role":"frontier"},
+    {"name":"River Bend","center":[18,0],"role":"water"}
+  ],
+  "landmarks": [
+    {"name":"Central Beacon","position":[0,10,0]},
+    {"name":"Old Town Clock","position":[-82,7,-2]},
+    {"name":"Mesa Marker","position":[118,8,-86]},
+    {"name":"Ruin Obelisk","position":[-76,7,128]},
+    {"name":"Outpost Gate","position":[145,2.2,84]}
+  ]
+}
