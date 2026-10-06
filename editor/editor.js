@@ -1,6 +1,7 @@
 import { createUI } from './ui.js';
 import { Gizmos } from './gizmos.js';
 import { Mesh } from '../engine/mesh.js';
+import { loadTextureBlob } from '../engine/loader.js';
 import { Material } from '../engine/material.js';
 import { AnimationClip } from '../engine/animation.js';
 import { DirectionalLight } from '../engine/light.js';
@@ -12,7 +13,7 @@ import { SelectionModel } from './selection.js';
 import { executeMeshCommand, executeSceneCommand } from './ops/meshCommands.js';
 import { runMeshOperator } from './ops/meshOperators.js';
 import { createDefaultAudioSceneConfig, normalizeAudioSceneConfig } from '../engine/audioConfig.js';
-import { exportOBJ, parseMTL, parseOBJ } from '../engine/obj.js';
+import { exportOBJ, parseMTL, parseOBJ, parseOBJBuffer } from '../engine/obj.js';
 
 export class Editor {
     constructor(scene, camera, renderer, audioManager = null) {
@@ -39,6 +40,7 @@ export class Editor {
         this.selectedFaces = this.selection.selectedFaces;
         this.selectedEdges = this.selection.selectedEdges;
         this.selectedVertices = this.selection.selectedVertices;
+        this.renderer.setSelectionProvider?.(() => this.selectedMeshes);
 
         this.uiRoot = document.getElementById('ui-root');
         this.ui = createUI(this.uiRoot, {
@@ -94,6 +96,8 @@ export class Editor {
             },
             onSetCameraView: view => this.setCameraView(view),
             onSetRenderMode: mode => this.renderer.setRenderMode(mode),
+            onSetRenderScale: scale => this.renderer.setRenderScale?.(scale),
+            onSetAutoQuality: enabled => this.renderer.setAutoQuality?.(enabled),
             onBonePoseChange: () => this.selected?.markDirty('skeletonPose'),
             onAddCube: () => this.addCube(),
             onAddPlane: () => this.addPrimitive('Plane'),
@@ -1011,32 +1015,85 @@ export class Editor {
     }
 
     async readOBJFiles(file, companionFiles = []) {
-        const objText = await file.text();
         const mtlFile = (companionFiles || []).find(candidate => candidate.name.toLowerCase().endsWith('.mtl'));
-        const materials = mtlFile ? parseMTL(await mtlFile.text()) : new Map();
-        return parseOBJ(objText, { materials });
+        const [objBytes, mtlText] = await Promise.all([
+            file.arrayBuffer(),
+            mtlFile ? mtlFile.text() : Promise.resolve('')
+        ]);
+        const materials = mtlText ? parseMTL(mtlText) : new Map();
+        const data = parseOBJBuffer(objBytes, { materials });
+        data.companionFiles = [...(companionFiles || [])];
+        data.materials = [...materials.entries()];
+        return data;
     }
 
-    addOBJMeshes(data) {
+    async addOBJMeshes(data) {
         const importedMeshes = [];
+        const materialDefs = new Map(data.materials || []);
+        const companionByName = new Map((data.companionFiles || []).map(file => [file.name.toLowerCase(), file]));
+        const textureCache = new Map();
+        const textureAssetCache = new Map();
+        const resolveTexture = async texturePath => {
+            if (!texturePath) return null;
+            const baseName = String(texturePath).split(/[\\/]/).pop().toLowerCase();
+            if (textureCache.has(baseName)) return textureCache.get(baseName);
+            const file = companionByName.get(baseName);
+            if (!file) return null;
+            const promise = (async () => {
+                try {
+                    if (textureAssetCache.has(baseName)) return textureAssetCache.get(baseName);
+                    const asset = await this.textureLibrary.addFile(file);
+                    textureAssetCache.set(baseName, asset);
+                    return asset;
+                } catch (error) {
+                    console.warn(`Could not load OBJ texture ${file.name}:`, error);
+                    return null;
+                }
+            })();
+            textureCache.set(baseName, promise);
+            return promise;
+        };
+
         for (const objectData of data.objects || []) {
-            const firstColor = objectData.faceColors?.find(Boolean) || [0.78, 0.84, 0.92];
+            const firstMaterialName = objectData.faceMaterials?.find(Boolean);
+            const firstDef = firstMaterialName ? materialDefs.get(firstMaterialName) : null;
+            const firstColor = objectData.faceColors?.find(Boolean) || firstDef?.baseColor || [0.78, 0.84, 0.92];
+            const faceMaterialDefs = (objectData.faceMaterials || []).map(name => materialDefs.get(name) || null);
+            const textureAssets = await Promise.all(faceMaterialDefs.map(def => resolveTexture(def?.texturePath)));
+            const hasTextures = textureAssets.some(Boolean);
             const material = new Material({
                 color: firstColor,
                 baseColor: firstColor,
+                opacity: Number(firstDef?.opacity ?? 1),
+                emission: firstDef?.emission || [0, 0, 0],
+                roughness: Number(firstDef?.roughness ?? 0.5),
+                metallic: Number(firstDef?.metallic ?? 0),
                 shading: 'toon',
                 name: `${objectData.name || 'OBJ'} Material`
             });
-            const mesh = new Mesh(material);
-            mesh.setTopology(objectData.positions || [], objectData.faces || []);
+            const mesh = new Mesh(material, { lazyTopology: true });
+            const colors = (objectData.faceColors || []).map(color => [...color, 1]);
+            const uvs = objectData.faceUvs?.length ? objectData.faceUvs.map(face => face.map(uv => [...uv])) : [];
+            if (hasTextures) {
+                mesh.setImportTopology(objectData.positions || [], objectData.faces || [], { faceColors: colors, faceUvs: uvs, bakeFaceColors: true });
+            } else {
+                // Large static, untextured OBJ geometry can use the specialized path and
+                // avoid constructing a second editable render representation.
+                mesh.setStaticTopology(objectData.positions || [], objectData.faces || [], colors);
+                mesh.bakeFaceColors = true;
+            }
+            mesh.faceTextures = textureAssets.map(asset => asset?.texture || null);
+            mesh.faceTextureIds = textureAssets.map(asset => asset?.id || null);
+            mesh.material.texture = textureAssets.find(Boolean)?.texture || null;
+            mesh.material.useTexture = !!mesh.material.texture;
+            mesh.staticOptimized = true;
             mesh.name = objectData.name || 'Imported OBJ Object';
-            mesh.faceColors = (objectData.faceColors || []).map(color => [...color, 1]);
-            if (objectData.faceUvs?.length) mesh.faceUvs = objectData.faceUvs.map(face => face.map(uv => [...uv]));
-            mesh.rebuildRenderData();
+            if (hasTextures) mesh.rebuildRenderData({ buildEditorData: false });
             this.scene.add(mesh);
             importedMeshes.push(mesh);
         }
         this.refreshSceneAssets();
+        this.ui.refreshTextures();
         this.ui.refreshHierarchy();
         this.select(importedMeshes[importedMeshes.length - 1] || null);
         return importedMeshes;
@@ -1058,7 +1115,7 @@ export class Editor {
         this.scene.meshes.length = 0;
         this.scene.name = sceneName;
         this.scene.assetId = record.id;
-        this.addOBJMeshes(data);
+        await this.addOBJMeshes(data);
         await this.sceneManager.saveScene();
         this.ui.refreshScenes();
         return record;
@@ -1177,7 +1234,13 @@ export class Editor {
                 const importedColors = meshData.faceColors || [];
                 const importedUvs = meshData.faceUvs || [];
                 const importedTransforms = (meshData.faceUvTransforms || []).map(transform => ({ scale: [...(transform.scale || [1, 1])], offset: [...(transform.offset || [0, 0])], rotation: transform.rotation || 0, flipX: !!transform.flipX, flipY: !!transform.flipY }));
-                mesh.setImportTopology(importPositions, importFaces, { faceColors: importedColors, faceUvs: importedUvs, faceUvTransforms: importedTransforms, bakeFaceColors: staticOptimized ? true : !!meshData.bakeFaceColors });
+                const hasTextureRefs = !!(meshData.textureAssetId || Object.values(meshData.textureSlots || {}).some(Boolean) || (meshData.faceTextureIds || []).some(Boolean));
+                if (staticOptimized && !hasTextureRefs) {
+                    mesh.setStaticTopology(importPositions, importFaces, importedColors);
+                    mesh.bakeFaceColors = true;
+                } else {
+                    mesh.setImportTopology(importPositions, importFaces, { faceColors: importedColors, faceUvs: importedUvs, faceUvTransforms: importedTransforms, bakeFaceColors: staticOptimized ? true : !!meshData.bakeFaceColors });
+                }
             }
             mesh.name = meshData.name || 'Imported Mesh';
             mesh.prefabInstance = meshData.prefabInstance ? JSON.parse(JSON.stringify(meshData.prefabInstance)) : null;

@@ -27,6 +27,9 @@ export class GameRuntime {
         this._fpsState = null;
         this._pointerLocked = false;
         this.player = null;
+        // Optional location-driven world streaming. Updating it never blocks the
+        // frame; cell loaders/unloaders run asynchronously behind a concurrency cap.
+        this.worldPartition = options.worldPartition || null;
     }
 
     play() {
@@ -61,6 +64,7 @@ export class GameRuntime {
         this.lastTime = now;
         this.elapsed += dt;
         this.audio?.setListenerFromCamera(this.camera);
+        this.worldPartition?.update?.(this.camera.position);
 
         this.accumulator += dt;
         while (this.accumulator >= this.fixedDt) {
@@ -115,6 +119,9 @@ export class GameRuntime {
         this.physics.removeBody(this.player.mesh);
         this.player.removeFromScene();
         this.player = null;
+        // Optional location-driven world streaming. Updating it never blocks the
+        // frame; cell loaders/unloaders run asynchronously behind a concurrency cap.
+        this.worldPartition = options.worldPartition || null;
     }
 
     addScript(key, updateFn) {
@@ -359,6 +366,9 @@ export class GameRuntime {
         }
         this._pointerLocked = false;
         this.player = null;
+        // Optional location-driven world streaming. Updating it never blocks the
+        // frame; cell loaders/unloaders run asynchronously behind a concurrency cap.
+        this.worldPartition = options.worldPartition || null;
         this._fpsCleanup?.();
         this._fpsCleanup = null;
     }
@@ -395,17 +405,34 @@ class SimplePhysics {
     constructor(scene) {
         this.scene = scene;
         this.bodies = new Map();
+        this.bodyList = [];
         this.staticColliders = [];
         this.cellSize = 32;
         this.staticGrid = new Map();
+        this._nearbyScratch = [];
+        this._nearbyStamp = 0;
     }
 
     addBody(mesh, { velocity = [0, 0, 0], gravity = -9.8, radius = 0.5 } = {}) {
-        this.bodies.set(mesh, { velocity: [...velocity], gravity, radius, grounded: false });
+        if (!mesh) return null;
+        const existing = this.bodies.get(mesh);
+        if (existing) return existing;
+        const body = { mesh, velocity: [...velocity], gravity, radius, grounded: false };
+        this.bodies.set(mesh, body);
+        this.bodyList.push(body);
+        return body;
     }
 
     removeBody(mesh) {
+        const body = this.bodies.get(mesh);
+        if (!body) return false;
         this.bodies.delete(mesh);
+        const index = this.bodyList.indexOf(body);
+        if (index >= 0) {
+            const last = this.bodyList.pop();
+            if (index < this.bodyList.length) this.bodyList[index] = last;
+        }
+        return true;
     }
 
     /** Build AABB list from all scene meshes (for player collision). */
@@ -439,11 +466,17 @@ class SimplePhysics {
         if (!this.staticGrid.size) return this.staticColliders;
         const minX = this._cellCoord(x - radius), maxX = this._cellCoord(x + radius);
         const minZ = this._cellCoord(z - radius), maxZ = this._cellCoord(z + radius);
-        const seen = new Set();
-        const out = [];
+        const stamp = ++this._nearbyStamp;
+        const out = this._nearbyScratch;
+        out.length = 0;
         for (let cx = minX; cx <= maxX; cx++) for (let cz = minZ; cz <= maxZ; cz++) {
-            const list = this.staticGrid.get(`${cx},${cz}`) || [];
-            for (const box of list) if (!seen.has(box)) { seen.add(box); out.push(box); }
+            const list = this.staticGrid.get(`${cx},${cz}`);
+            if (!list) continue;
+            for (const box of list) {
+                if (box._physicsQueryStamp === stamp) continue;
+                box._physicsQueryStamp = stamp;
+                out.push(box);
+            }
         }
         return out;
     }
@@ -480,14 +513,17 @@ class SimplePhysics {
     }
 
     step(dt) {
-        for (const [mesh, body] of this.bodies) {
-            if (!this.scene.meshes.includes(mesh)) continue;
+        for (const body of this.bodyList) {
+            const mesh = body.mesh;
+            if (!this.bodies.has(mesh)) continue;
             body.velocity[1] += body.gravity * dt;
-            mesh.position[0] += body.velocity[0] * dt;
-            mesh.position[1] += body.velocity[1] * dt;
-            mesh.position[2] += body.velocity[2] * dt;
+            mesh._suppressTransformDirty = true;
+            try {
+                mesh.position[0] += body.velocity[0] * dt;
+                mesh.position[1] += body.velocity[1] * dt;
+                mesh.position[2] += body.velocity[2] * dt;
 
-            // Dynamic body vs static colliders
+                // Dynamic body vs static colliders
             if (this.staticColliders.length) {
                 const r = body.radius;
                 let grounded = false;
@@ -511,18 +547,21 @@ class SimplePhysics {
                 body.grounded = false;
             }
 
-            for (const other of this.bodies.keys()) {
-                if (other === mesh) continue;
-                if (aabbOverlap(mesh, other)) {
-                    const dy = (mesh.position[1] - other.position[1]);
-                    if (Math.abs(dy) < 1.2) {
-                        mesh.position[1] += Math.sign(dy || 1) * 0.05;
-                        body.velocity[1] = 0;
+                for (const otherBody of this.bodyList) {
+                    const other = otherBody.mesh;
+                    if (other === mesh || !this.bodies.has(other)) continue;
+                    if (aabbOverlap(mesh, other)) {
+                        const dy = (mesh.position[1] - other.position[1]);
+                        if (Math.abs(dy) < 1.2) {
+                            mesh.position[1] += Math.sign(dy || 1) * 0.05;
+                            body.velocity[1] = 0;
+                        }
                     }
                 }
+            } finally {
+                mesh._suppressTransformDirty = false;
+                mesh.markTransformChanged?.();
             }
-            mesh.invalidateTransformCache?.();
-            mesh.transformRevision = (mesh.transformRevision || 0) + 1;
         }
     }
 }

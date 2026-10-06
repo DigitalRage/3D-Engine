@@ -100,6 +100,8 @@ export function createUI(root, options) {
         .bone-slider-group { margin-top: 8px; }
         .bone-slider-label { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
         .bone-slider-label output, .bone-weight-group output { color: #ffd071; font-variant-numeric: tabular-nums; }
+        .range-row { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px; }
+        .editor-range { width: 100%; margin: 2px 0; accent-color: #9ed8ff; }
         .range-value { color: #ffd071; font-size: 11px; font-variant-numeric: tabular-nums; }
         .bone-weight-group { margin-top: 16px; padding-top: 12px; border-top: 1px solid #344657; }
         .animation-editor { min-width: 0; margin: 12px 0; padding-top: 10px; border-top: 1px solid #344657; }
@@ -425,10 +427,44 @@ export function createUI(root, options) {
     });
     renderButtons.get('anime').classList.add('selected');
 
+    const resolutionWrap = document.createElement('div');
+    resolutionWrap.className = 'field-group';
+    const resolutionLabel = document.createElement('label');
+    resolutionLabel.className = 'field-label';
+    resolutionLabel.textContent = 'Render Resolution';
+    const resolutionRow = document.createElement('div');
+    resolutionRow.className = 'range-row';
+    const resolution = document.createElement('input');
+    resolution.type = 'range';
+    resolution.min = '35'; resolution.max = '100'; resolution.step = '5'; resolution.value = '60';
+    resolution.className = 'editor-range';
+    resolution.setAttribute('aria-label', 'Render Resolution');
+    const resolutionValue = document.createElement('output');
+    resolutionValue.className = 'range-value';
+    resolutionValue.textContent = '60%';
+    resolution.addEventListener('input', () => {
+        resolutionValue.textContent = `${resolution.value}%`;
+        options.onSetRenderScale?.(Number(resolution.value) / 100);
+    });
+    resolutionRow.append(resolution, resolutionValue);
+    resolutionWrap.append(resolutionLabel, resolutionRow);
+    activeToolGroup.appendChild(resolutionWrap);
+
+    const autoQualityWrap = document.createElement('label');
+    autoQualityWrap.className = 'field-group';
+    const autoQuality = document.createElement('input');
+    autoQuality.type = 'checkbox';
+    autoQuality.checked = false;
+    autoQuality.addEventListener('change', () => options.onSetAutoQuality?.(autoQuality.checked));
+    const autoQualityText = document.createElement('span');
+    autoQualityText.textContent = ' Auto Quality (potato-friendly)';
+    autoQualityWrap.append(autoQuality, autoQualityText);
+    activeToolGroup.appendChild(autoQualityWrap);
+
     group('View & Scene');
     button('Center View', onResetCamera);
     button('Export OBJ + MTL', onExport);
-    if (onExportJSON) button('Legacy JSON', onExportJSON);
+
     const sceneControls = document.createElement('div');
     sceneControls.className = 'scene-controls';
     activeToolGroup.appendChild(sceneControls);

@@ -267,9 +267,9 @@ export function createInspectorPanel(gl, textureLibrary, onSelectFace, onHistory
             currentMesh.material.doubleSided = checked;
             currentMesh.updateRenderQueues();
         }));
-        addVectorField('Position', currentMesh.position, (index, value) => { currentMesh.position[index] = value; currentMesh.transformRevision = (currentMesh.transformRevision || 0) + 1; currentMesh._modelMatrixCacheRevision = -1; });
-        addVectorField('Rotation', currentMesh.rotation, (index, value) => { currentMesh.rotation[index] = value; currentMesh.transformRevision = (currentMesh.transformRevision || 0) + 1; currentMesh._modelMatrixCacheRevision = -1; }, true);
-        addVectorField('Scale', currentMesh.scale, (index, value) => { currentMesh.scale[index] = value; currentMesh.transformRevision = (currentMesh.transformRevision || 0) + 1; currentMesh._modelMatrixCacheRevision = -1; });
+        addVectorField('Position', currentMesh.position, (index, value) => { currentMesh.position[index] = value; currentMesh.markTransformChanged(); });
+        addVectorField('Rotation', currentMesh.rotation, (index, value) => { currentMesh.rotation[index] = value; currentMesh.markTransformChanged(); }, true);
+        addVectorField('Scale', currentMesh.scale, (index, value) => { currentMesh.scale[index] = value; currentMesh.markTransformChanged(); });
 
         const colorGroup = document.createElement('div');
         colorGroup.className = 'field-group';

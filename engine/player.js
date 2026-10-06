@@ -53,9 +53,11 @@ export class PlayerCharacter {
 
     prePhysics(dt, input) {
         if (!this.body) return;
-        const orbitYaw = this.cameraYaw;
-        const forward = [-Math.sin(orbitYaw), 0, -Math.cos(orbitYaw)];
-        const right = [Math.cos(orbitYaw), 0, -Math.sin(orbitYaw)];
+        // Movement follows the camera's horizontal heading, not the character's own heading.
+        // This gives modern third-person controls instead of tank controls.
+        const moveYaw = this.cameraYaw;
+        const forward = [-Math.sin(moveYaw), 0, -Math.cos(moveYaw)];
+        const right = [Math.cos(moveYaw), 0, -Math.sin(moveYaw)];
         let x = 0, z = 0;
         // Arrow keys intentionally belong to the third-person camera, not movement.
         if (input.isDown('KeyW')) { x += forward[0]; z += forward[2]; }
@@ -105,12 +107,16 @@ export class PlayerCharacter {
         // Camera orbit: mouse plus arrow-key look.
         const delta = input.mouseDelta;
         if (input.mouseButtons[2] || (input.mouseButtons[0] && input.isDown('ShiftLeft'))) {
-            this.cameraYaw -= delta[0] * this.mouseSensitivity;
+            this.cameraYaw += delta[0] * this.mouseSensitivity;
             this.cameraPitch = clamp(this.cameraPitch - delta[1] * this.mouseSensitivity, 6 * Math.PI / 180, 70 * Math.PI / 180);
         }
         const arrowYaw = (input.isDown('ArrowRight') ? 1 : 0) - (input.isDown('ArrowLeft') ? 1 : 0);
         const arrowPitch = (input.isDown('ArrowDown') ? 1 : 0) - (input.isDown('ArrowUp') ? 1 : 0);
-        this.cameraYaw += arrowYaw * this._cameraArrowSpeed * dt;
+        const arrowTurn = arrowYaw * this._cameraArrowSpeed * dt;
+        if (arrowTurn) {
+            // Arrow keys orbit the camera only. The player turns when movement starts.
+            this.cameraYaw += arrowTurn;
+        }
         this.cameraPitch = clamp(this.cameraPitch + arrowPitch * this._cameraArrowSpeed * 0.72 * dt, 6 * Math.PI / 180, 70 * Math.PI / 180);
 
         const target = [this.mesh.position[0], this.mesh.position[1] + this.cameraTargetHeight, this.mesh.position[2]];
@@ -219,125 +225,200 @@ function buildGeometry() {
     const faces = [];
     const faceMaterials = [];
     const vertexWeights = [];
+    const reverseRanges = [];
 
-    const addVertex = (p, weights) => {
+    const addVertex = (p, weights = []) => {
         positions.push([...p]);
         vertexWeights.push(weights ? [...weights] : []);
         return positions.length - 1;
     };
-    const addTriangle = (a, b, c, material = 'body') => {
-        faces.push([a, b, c]);
-        faceMaterials.push(material);
+
+    const addOrientedTriangle = (a, b, c, outward) => {
+        const pa = positions[a], pb = positions[b], pc = positions[c];
+        const ab = sub(pb, pa), ac = sub(pc, pa);
+        const n = cross(ab, ac);
+        if (dot(n, outward) < 0) faces.push([a, c, b]);
+        else faces.push([a, b, c]);
     };
 
-    // Low-poly tapered solid with a beveled middle ring. The overlap at joints,
-    // plus mixed weights around the joint rings, keeps animation transitions clean.
-    const addPart = ({start, end, r0, r1, segments = 9, boneA, boneB = boneA, zScale = 1, cap = true}) => {
-        const axis = normalize(sub(end, start));
-        const basisA = normalize(cross(axis, Math.abs(axis[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]));
-        const basisB = cross(axis, basisA);
+    const addChain = ({ points, radii, bones, segments = 10, zScale = 1, material = 'body', cap = true }) => {
         const rings = [];
-        for (let ringIndex = 0; ringIndex < 3; ringIndex++) {
-            const t = ringIndex / 2;
-            const center = lerp(start, end, t);
-            const radius = r0 * (1 - t) + r1 * t;
+        for (let r = 0; r < points.length; r++) {
+            const prev = points[Math.max(0, r - 1)];
+            const next = points[Math.min(points.length - 1, r + 1)];
+            const tangent = normalize(sub(next, prev));
+            const ref = Math.abs(tangent[2]) < 0.92 ? [0, 0, 1] : [1, 0, 0];
+            const basisA = normalize(cross(tangent, ref));
+            const basisB = normalize(cross(tangent, basisA));
             const ring = [];
-            const wA = ringIndex === 0 ? 1 : ringIndex === 1 ? 0.62 : 0.12;
-            const wB = 1 - wA;
-            const weights = boneA === boneB ? [[boneA, 1]] : [[boneA, wA], [boneB, wB]];
+            const bone = bones[r] || bones[bones.length - 1];
+            const prevBone = bones[Math.max(0, r - 1)] || bone;
+            const weights = prevBone === bone
+                ? [[bone, 1]]
+                : [[prevBone, 0.56], [bone, 0.44]];
             for (let i = 0; i < segments; i++) {
                 const a = Math.PI * 2 * i / segments;
-                const c = Math.cos(a), s = Math.sin(a);
-                ring.push(addVertex(add(center, add(scale(basisA, radius * c), scale(basisB, radius * s * zScale))), weights));
+                const radial = add(scale(basisA, Math.cos(a) * radii[r]), scale(basisB, Math.sin(a) * radii[r] * zScale));
+                ring.push(addVertex(add(points[r], radial), weights));
             }
             rings.push(ring);
         }
-        for (let r = 0; r < 2; r++) {
+
+        const sideFaceStart = faces.length;
+        for (let r = 0; r < rings.length - 1; r++) {
+            const ringA = rings[r], ringB = rings[r + 1];
+            const center = midpoint(points[r], points[r + 1]);
             for (let i = 0; i < segments; i++) {
                 const j = (i + 1) % segments;
-                addTriangle(rings[r][i], rings[r + 1][i], rings[r + 1][j]);
-                addTriangle(rings[r][i], rings[r + 1][j], rings[r][j]);
+                const outward1 = normalize(sub(centroid4(ringA[i], ringA[j], ringB[j], ringB[i]), center));
+                addOrientedTriangle(ringA[i], ringB[i], ringB[j], outward1);
+                addOrientedTriangle(ringA[i], ringB[j], ringA[j], outward1);
+                faceMaterials.push(material, material);
             }
         }
+        reverseRanges.push([sideFaceStart, faces.length]);
+
         if (cap) {
-            const a = addVertex(start, [[boneA, 1]]);
-            const b = addVertex(end, [[boneB, 1]]);
+            const startCenter = points[0];
+            const endCenter = points[points.length - 1];
+            const startDir = normalize(sub(points[0], points[1]));
+            const endDir = normalize(sub(points[points.length - 1], points[points.length - 2]));
+            const startCenterIndex = addVertex(startCenter, [[bones[0] || 'Root', 1]]);
+            const endCenterIndex = addVertex(endCenter, [[bones[bones.length - 1] || 'Root', 1]]);
             for (let i = 0; i < segments; i++) {
                 const j = (i + 1) % segments;
-                addTriangle(a, rings[0][j], rings[0][i]);
-                addTriangle(b, rings[2][i], rings[2][j]);
+                addOrientedTriangle(startCenterIndex, rings[0][i], rings[0][j], startDir);
+                faceMaterials.push(material);
+                addOrientedTriangle(endCenterIndex, rings[rings.length - 1][j], rings[rings.length - 1][i], endDir);
+                faceMaterials.push(material);
             }
         }
     };
 
-    // Torso/pelvis: broad shoulders tapering into a narrow waist, all part of one silhouette.
-    addPart({start:[0,0.58,0], end:[0,0.84,0], r0:0.30, r1:0.34, zScale:0.84, boneA:'Pelvis', boneB:'Spine'});
-    addPart({start:[0,0.82,0], end:[0,1.18,0], r0:0.34, r1:0.31, zScale:0.78, boneA:'Spine', boneB:'Chest'});
-    addPart({start:[0,1.16,0], end:[0,1.40,0], r0:0.31, r1:0.40, zScale:0.72, boneA:'Chest'});
+    // Main torso is one continuous tapered volume, with a broad chest and compact waist.
+    addChain({
+        points: [[0,0.44,0],[0,0.61,0],[0,0.82,0],[0,1.07,0],[0,1.30,0],[0,1.40,0]],
+        radii: [0.27,0.29,0.27,0.26,0.29,0.32],
+        bones: ['Pelvis','Pelvis','Spine','Spine','Chest','Chest'],
+        segments: 12, zScale: 0.74
+    });
 
-    // Arms, with wide shoulder-to-elbow taper and cleaner forearms.
-    addPart({start:[-0.36,1.39,0], end:[-0.66,1.04,0], r0:0.14, r1:0.115, segments:8, boneA:'UpperArm.L', boneB:'ForeArm.L', zScale:0.78});
-    addPart({start:[-0.66,1.04,0], end:[-0.70,0.73,0], r0:0.115, r1:0.08, segments:8, boneA:'ForeArm.L', boneB:'Hand.L', zScale:0.75});
-    addPart({start:[-0.70,0.75,-0.005], end:[-0.72,0.57,-0.045], r0:0.085, r1:0.07, segments:8, boneA:'Hand.L', zScale:0.82});
-    addPart({start:[0.36,1.39,0], end:[0.66,1.04,0], r0:0.14, r1:0.115, segments:8, boneA:'UpperArm.R', boneB:'ForeArm.R', zScale:0.78});
-    addPart({start:[0.66,1.04,0], end:[0.70,0.73,0], r0:0.115, r1:0.08, segments:8, boneA:'ForeArm.R', boneB:'Hand.R', zScale:0.75});
-    addPart({start:[0.70,0.75,-0.005], end:[0.72,0.57,-0.045], r0:0.085, r1:0.07, segments:8, boneA:'Hand.R', zScale:0.82});
+    // A connected, flared anime skirt/dress shape wraps around the pelvis and overlaps the thighs.
+    addChain({
+        points: [[0,0.63,0],[0,0.48,0],[0,0.31,0],[0,0.20,0]],
+        radii: [0.30,0.34,0.39,0.43],
+        bones: ['Pelvis','Pelvis','Pelvis','Pelvis'],
+        segments: 12, zScale: 0.64
+    });
 
-    // Legs: strong anime proportions and angular boots.
-    addPart({start:[-0.21,0.62,0], end:[-0.22,0.28,0], r0:0.145, r1:0.115, segments:8, boneA:'UpperLeg.L', boneB:'LowerLeg.L', zScale:0.72});
-    addPart({start:[-0.22,0.28,0], end:[-0.22,0.03,0], r0:0.115, r1:0.085, segments:8, boneA:'LowerLeg.L', boneB:'Foot.L', zScale:0.68});
-    addPart({start:[-0.22,0.06,-0.02], end:[-0.22,-0.10,-0.13], r0:0.095, r1:0.10, segments:8, boneA:'Foot.L', zScale:0.92});
-    addPart({start:[0.21,0.62,0], end:[0.22,0.28,0], r0:0.145, r1:0.115, segments:8, boneA:'UpperLeg.R', boneB:'LowerLeg.R', zScale:0.72});
-    addPart({start:[0.22,0.28,0], end:[0.22,0.03,0], r0:0.115, r1:0.085, segments:8, boneA:'LowerLeg.R', boneB:'Foot.R', zScale:0.68});
-    addPart({start:[0.22,0.06,-0.02], end:[0.22,-0.10,-0.13], r0:0.095, r1:0.10, segments:8, boneA:'Foot.R', zScale:0.92});
+    // Arms use shared joint rings so the elbow and shoulder remain continuous during animation.
+    for (const side of [-1, 1]) {
+        const label = side < 0 ? 'L' : 'R';
+        addChain({
+            points: [[0.30*side,1.32,0],[0.43*side,1.17,0],[0.60*side,0.98,-0.01],[0.65*side,0.77,-0.03],[0.63*side,0.59,-0.12]],
+            radii: [0.135,0.120,0.095,0.075,0.062],
+            bones: [`UpperArm.${label}`,`UpperArm.${label}`,`ForeArm.${label}`,`ForeArm.${label}`,`Hand.${label}`],
+            segments: 10, zScale: 0.76
+        });
+    }
 
-    // Neck and angular anime head: jaw is tapered, not spherical.
-    addPart({start:[0,1.39,0], end:[0,1.58,0], r0:0.10, r1:0.105, segments:8, boneA:'Neck', boneB:'Head', zScale:0.82});
-    addPart({start:[0,1.56,0], end:[0,1.78,0], r0:0.19, r1:0.23, segments:8, boneA:'Head', zScale:0.88});
-    addPart({start:[0,1.77,0], end:[0,1.98,0], r0:0.23, r1:0.16, segments:8, boneA:'Head', zScale:0.90});
+    // Legs overlap the skirt and remain continuous from thigh to ankle; feet extend forward.
+    for (const side of [-1, 1]) {
+        const label = side < 0 ? 'L' : 'R';
+        addChain({
+            points: [[0.17*side,0.54,0],[0.18*side,0.37,0],[0.18*side,0.17,0],[0.18*side,0.06,0],[0.18*side,0.03,-0.16]],
+            radii: [0.145,0.120,0.095,0.075,0.090],
+            bones: [`UpperLeg.${label}`,`UpperLeg.${label}`,`LowerLeg.${label}`,`LowerLeg.${label}`,`Foot.${label}`],
+            segments: 10, zScale: 0.70
+        });
+    }
 
-    // Seven angular hair spikes, deliberately wedge-like rather than rounded.
-    const spikes = [
-        [-0.22, 1.93, 0.00, -0.42, 2.13, 0.05],
-        [-0.10, 2.00, -0.04, -0.18, 2.28, -0.01],
-        [0.00, 2.02, -0.05, 0.05, 2.34, -0.02],
-        [0.12, 2.00, -0.04, 0.28, 2.29, 0.00],
-        [0.22, 1.94, 0.00, 0.49, 2.13, 0.05],
-        [-0.12, 1.99, 0.12, -0.27, 2.17, 0.25],
-        [0.10, 1.99, 0.12, 0.23, 2.17, 0.25]
-    ];
-    for (const [sx,sy,sz,tx,ty,tz] of spikes) addSpike([sx,sy,sz],[tx,ty,tz],'Head');
+    // Neck overlaps the chest and the head starts inside it, preventing the classic floating-head gap.
+    addChain({
+        points: [[0,1.35,0],[0,1.48,0],[0,1.57,0]],
+        radii: [0.10,0.095,0.135],
+        bones: ['Neck','Neck','Head'],
+        segments: 10, zScale: 0.80
+    });
 
-    // White polygonal eyes: 10 triangles per eye.
-    addEye(-0.076, 1.78, -0.220, 0.067, 10, 'Head');
-    addEye(0.076, 1.78, -0.220, 0.067, 10, 'Head');
+    // Angular head/face volume. It stays faceted, but its proportions read as anime rather than a capsule.
+    addChain({
+        points: [[0,1.53,0],[0,1.65,0],[0,1.82,0],[0,1.98,0],[0,2.08,0]],
+        radii: [0.15,0.21,0.26,0.27,0.19],
+        bones: ['Head','Head','Head','Head','Head'],
+        segments: 12, zScale: 0.78
+    });
+
+    // A single faceted hair mass gives the bob shape seen in the reference, with overlapping locks for the silhouette.
+    addChain({
+        points: [[0,1.58,0.005],[0,1.72,0.01],[0,1.87,0.015],[0,2.03,0.01],[0,2.12,0.00]],
+        radii: [0.23,0.29,0.34,0.32,0.22],
+        bones: ['Head','Head','Head','Head','Head'],
+        segments: 14, zScale: 0.76
+    });
+
+    // Side hair panels and bangs are wedge solids that intersect the main hair mass instead of floating beside it.
+    addHairWedge([-0.26,1.86,0.02],[-0.48,1.54,0.01],[-0.29,1.57,-0.16],0.11);
+    addHairWedge([ 0.26,1.86,0.02],[ 0.48,1.54,0.01],[ 0.29,1.57,-0.16],0.11);
+    for (let i = -1; i <= 1; i++) {
+        const x = i * 0.095;
+        addBang([x-0.07,1.99,-0.22],[x+0.07,1.99,-0.22],[x*0.72,1.79,-0.30]);
+    }
+
+    // The only white geometry is the eyes. They sit almost flush with the face instead of protruding like separate objects.
+    addEye(-0.095, 1.82, -0.267, 0.050, 0.038, 10, 'Head');
+    addEye( 0.095, 1.82, -0.267, 0.050, 0.038, 10, 'Head');
+
+    // The tube sides use the opposite winding convention from the WebGL front-face state,
+    // while their caps and the custom hair solids already have deliberate outward winding.
+    for (const [start, end] of reverseRanges) {
+        for (let i = start; i < end; i++) faces[i] = [...faces[i]].reverse();
+    }
 
     return { positions, faces, faceMaterials, vertexWeights };
 
-    function addSpike(base, tip, bone) {
-        const dir = normalize(sub(tip, base));
-        const sideA = normalize(cross(dir, [0, 1, 0]));
-        const sideB = normalize(cross(dir, sideA));
-        const b0 = addVertex(add(base, scale(sideA, 0.07)), [[bone, 1]]);
-        const b1 = addVertex(add(base, scale(sideA, -0.07)), [[bone, 1]]);
-        const b2 = addVertex(add(base, scale(sideB, 0.055)), [[bone, 1]]);
-        const tipI = addVertex(tip, [[bone, 1]]);
-        addTriangle(b0,b1,tipI);
-        addTriangle(b1,b2,tipI);
-        addTriangle(b2,b0,tipI);
-        addTriangle(b2,b1,b0);
+    function addHairWedge(a, b, c, depth) {
+        const tip = [c[0], c[1], c[2] - depth];
+        const p0 = addVertex(a, [['Head',1]]);
+        const p1 = addVertex(b, [['Head',1]]);
+        const p2 = addVertex(c, [['Head',1]]);
+        const p3 = addVertex(tip, [['Head',1]]);
+        addOrientedTriangle(p0,p1,p2,normalize(cross(sub(b,a),sub(c,a)))); faceMaterials.push('body');
+        addOrientedTriangle(p1,p3,p2,normalize(sub(midpoint(b,c),midpoint(a,c)))); faceMaterials.push('body');
+        addOrientedTriangle(p2,p3,p0,normalize(sub(midpoint(c,a),midpoint(b,a)))); faceMaterials.push('body');
+        addOrientedTriangle(p3,p1,p0,normalize(sub(midpoint(b,a),tip))); faceMaterials.push('body');
     }
 
-    function addEye(cx, cy, cz, radius, segments, bone) {
+    function addBang(left, right, tip) {
+        const a = addVertex(left, [['Head',1]]);
+        const b = addVertex(right, [['Head',1]]);
+        const c = addVertex([tip[0],tip[1],tip[2]], [['Head',1]]);
+        const back = addVertex([tip[0],tip[1]+0.055,tip[2]+0.095], [['Head',1]]);
+        const hint = [0,0,-1];
+        addOrientedTriangle(a,b,c,hint); faceMaterials.push('body');
+        addOrientedTriangle(b,back,c,hint); faceMaterials.push('body');
+        addOrientedTriangle(c,back,a,hint); faceMaterials.push('body');
+        addOrientedTriangle(back,b,a,[0,1,0]); faceMaterials.push('body');
+    }
+
+    function addEye(cx, cy, cz, radiusX, radiusY, segments, bone) {
         const center = addVertex([cx,cy,cz], [[bone,1]]);
-        const ring=[];
+        const ring = [];
         for (let i=0;i<segments;i++) {
             const a = 2*Math.PI*i/segments;
-            ring.push(addVertex([cx+radius*Math.cos(a),cy+radius*Math.sin(a),cz], [[bone,1]]));
+            ring.push(addVertex([cx+radiusX*Math.cos(a), cy+radiusY*Math.sin(a), cz], [[bone,1]]));
         }
-        for (let i=0;i<segments;i++) addTriangle(center,ring[(i+1)%segments],ring[i],'eye');
+        for (let i=0;i<segments;i++) {
+            const j = (i+1)%segments;
+            addOrientedTriangle(center, ring[i], ring[j], [0,0,-1]);
+            faceMaterials.push('eye');
+        }
     }
 }
+
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function midpoint(a,b){return a.map((v,i)=>(v+b[i])*0.5);}
+function centroid4(a,b,c,d){return [(a[0]+b[0]+c[0]+d[0])*0.25,(a[1]+b[1]+c[1]+d[1])*0.25,(a[2]+b[2]+c[2]+d[2])*0.25];}
 
 function createPlayerAnimations() {
     const idle = new AnimationClip('Idle', 2.0);

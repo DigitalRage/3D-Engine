@@ -5,8 +5,6 @@ import { Mesh } from './engine/mesh.js';
 import { Material } from './engine/material.js';
 import { loadTexture } from './engine/loader.js';
 import { Editor } from './editor/editor.js';
-import { GameRuntime } from './engine/runtime.js';
-import { PlayerCharacter } from './engine/player.js';
 
 const canvas = document.getElementById('viewport');
 const renderer = new Renderer(canvas);
@@ -61,69 +59,79 @@ async function init() {
     hideLoadingScreen();
     void loadDeferredAssets();
 
-    window.togglePlayMode = () => {
-        playMode = !playMode;
-        if (playMode) {
-            savedCamera = {
-                position: [...camera.position],
-                target: [...camera.target],
-                far: camera.far,
-                viewMode: camera.viewMode
-            };
+    let playModeTransition = null;
+    window.togglePlayMode = async () => {
+        if (playModeTransition) return playModeTransition;
+        playModeTransition = (async () => {
+            if (!playMode) {
+                const [{ GameRuntime }, { PlayerCharacter }] = await Promise.all([
+                    import('./engine/runtime.js'),
+                    import('./engine/player.js')
+                ]);
+                playMode = true;
+                savedCamera = {
+                    position: [...camera.position],
+                    target: [...camera.target],
+                    far: camera.far,
+                    viewMode: camera.viewMode
+                };
 
-            // Third-person exploration starts near the city plaza.
-            const spawn = [-150, 0, 18];
-            camera.position = [-150, 3.1, 23];
-            camera.target = [-150, 1.0, 18];
-            camera.far = 700;
+                // Third-person exploration starts near the city plaza.
+                const spawn = [-150, 0, 18];
+                camera.position = [-150, 3.1, 23];
+                camera.target = [-150, 1.0, 18];
+                camera.far = 700;
 
-            runtime = new GameRuntime(renderer, scene, camera, {
-                audio: audioManager,
-                onUpdate: () => {}
-            });
-            playerCharacter = new PlayerCharacter({ spawn });
-            runtime.enableThirdPersonPlayer(playerCharacter, {
-                spawn,
-                moveSpeed: 5.2,
-                sprintMultiplier: 1.8,
-                jumpSpeed: 8.8,
-                gravity: -24,
-                radius: 0.34,
-                cameraDistance: 4.6,
-                cameraTargetHeight: 1.0
-            });
+                runtime = new GameRuntime(renderer, scene, camera, {
+                    audio: audioManager,
+                    onUpdate: () => {}
+                });
+                playerCharacter = new PlayerCharacter({ spawn });
+                runtime.enableThirdPersonPlayer(playerCharacter, {
+                    spawn,
+                    moveSpeed: 5.2,
+                    sprintMultiplier: 1.8,
+                    jumpSpeed: 8.8,
+                    gravity: -24,
+                    radius: 0.34,
+                    cameraDistance: 4.6,
+                    cameraTargetHeight: 1.0
+                });
 
-            runtime.play();
-            editor.ui?.setStatus?.(
-                'Play mode — WASD move, Arrow Keys or mouse/right-drag camera, Space jump, Shift sprint, Esc exits.'
-            );
-            const ui = document.getElementById('ui-root');
-            if (ui) {
-                ui.style.pointerEvents = 'none';
-                ui.style.opacity = '0.35';
+                runtime.play();
+                editor.ui?.setStatus?.(
+                    'Play mode — WASD move, Arrow Keys or mouse/right-drag camera, Space jump, Shift sprint, Esc exits.'
+                );
+                const ui = document.getElementById('ui-root');
+                if (ui) {
+                    ui.style.pointerEvents = 'none';
+                    ui.style.opacity = '0.35';
+                }
+            } else {
+                playMode = false;
+                runtime?.stop();
+                runtime?.disableThirdPersonPlayer?.();
+                playerCharacter = null;
+                runtime = null;
+
+                if (savedCamera) {
+                    camera.position = [...savedCamera.position];
+                    camera.target = [...savedCamera.target];
+                    camera.far = savedCamera.far;
+                    camera.viewMode = savedCamera.viewMode;
+                    savedCamera = null;
+                }
+                editor.gizmos?.syncFromCamera?.();
+
+                const ui = document.getElementById('ui-root');
+                if (ui) {
+                    ui.style.pointerEvents = '';
+                    ui.style.opacity = '';
+                }
+                editor.ui?.setStatus?.('Editor mode');
             }
-        } else {
-            runtime?.stop();
-            runtime?.disableThirdPersonPlayer?.();
-            playerCharacter = null;
-            runtime = null;
-
-            if (savedCamera) {
-                camera.position = [...savedCamera.position];
-                camera.target = [...savedCamera.target];
-                camera.far = savedCamera.far;
-                camera.viewMode = savedCamera.viewMode;
-                savedCamera = null;
-            }
-            editor.gizmos?.syncFromCamera?.();
-
-            const ui = document.getElementById('ui-root');
-            if (ui) {
-                ui.style.pointerEvents = '';
-                ui.style.opacity = '';
-            }
-            editor.ui?.setStatus?.('Editor mode');
-        }
+        })().finally(() => { playModeTransition = null; });
+        return playModeTransition;
     };
 
     window.addEventListener('keydown', e => {
@@ -226,6 +234,7 @@ function loop() {
     editor.update(now);
     audioManager.setListenerFromCamera(camera);
     renderer.render(scene, camera);
+    renderer.updateAdaptiveQuality?.(renderer.frameStats.cpuMs || (performance.now() - workStart), now);
     measuredWorkMs += performance.now() - workStart;
     measuredFrames++;
     const windowElapsed = performance.now() - fpsWindowStart;

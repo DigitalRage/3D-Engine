@@ -15,6 +15,7 @@ export class Mesh {
         this._position = [0, 0, 0];
         this._rotation = [0, 0, 0];
         this._scale = [1, 1, 1];
+        this._suppressTransformDirty = false;
         this.position = [0, 0, 0];
         this.rotation = [0, 0, 0];
         this.scale = [1, 1, 1];
@@ -33,6 +34,9 @@ export class Mesh {
         this.normalBuffer = null;
         this.colorBuffer = null;
         this.uvBuffer = null;
+        this.indexBuffer = null;
+        this._instancedRendererVAO = null;
+        this._instancedRendererVAOExt = null;
         this.faceColors = [];
         this.faceTextures = [];
         this.faceTextureIds = [];
@@ -148,9 +152,21 @@ export class Mesh {
         for (const flag of flags) {
             if (!(flag in this.dirtyFlags)) continue;
             this.dirtyFlags[flag] = true;
-            if (flag === 'geometry') this.geometryRevision++;
+            if (flag === 'geometry') {
+                this.geometryRevision++;
+                // Geometry edits invalidate both local bounds and the scene's spatial
+                // broad phase. Without this, frustum culling can use a stale/zero
+                // radius even though the render buffers contain the new geometry.
+                this._boundsDirty = true;
+                this._worldBoundsRevision = -1;
+                this._scene?.markSpatialDirty?.(this);
+            }
             if (flag === 'skeletonPose') this.skinRevision++;
             if (flag === 'geometry' || flag === 'uvs' || flag === 'materials' || flag === 'selection') renderDirty = true;
+            // Batch eligibility can change in either direction. A mesh that was
+            // dynamic can become batchable after an edit, so do not gate the dirty
+            // signal on its previous batch-exclusion state.
+            if (flag === 'geometry' || flag === 'uvs' || flag === 'materials' || flag === 'selection') this._scene?.markStaticBatchDirty?.();
         }
         if (renderDirty) this._scene?.markRenderDirty?.();
         if (flags.includes('skeletonPose')) this._scene?.markPoseDirty?.();
@@ -163,11 +179,11 @@ export class Mesh {
     }
 
     get position() { return this._position; }
-    set position(value) { this._position = observeTransformArray(value, () => this.markTransformChanged()); this.markTransformChanged(); }
+    set position(value) { this._position = observeTransformArray(value, () => { if (!this._suppressTransformDirty) this.markTransformChanged(); }); this.markTransformChanged(); }
     get rotation() { return this._rotation; }
-    set rotation(value) { this._rotation = observeTransformArray(value, () => this.markTransformChanged()); this.markTransformChanged(); }
+    set rotation(value) { this._rotation = observeTransformArray(value, () => { if (!this._suppressTransformDirty) this.markTransformChanged(); }); this.markTransformChanged(); }
     get scale() { return this._scale; }
-    set scale(value) { this._scale = observeTransformArray(value, () => this.markTransformChanged()); this.markTransformChanged(); }
+    set scale(value) { this._scale = observeTransformArray(value, () => { if (!this._suppressTransformDirty) this.markTransformChanged(); }); this.markTransformChanged(); }
 
     attachScene(scene) {
         this._scene = scene || null;
@@ -177,7 +193,10 @@ export class Mesh {
     markTransformChanged() {
         this.transformRevision = (this.transformRevision || 0) + 1;
         this._modelMatrixCacheRevision = -1;
-        this._scene?.markRenderDirty?.();
+        this._worldBoundsRevision = -1;
+        this._scene?.markSpatialDirty?.(this);
+        if (!this._renderStaticBatchExcluded) this._scene?.markStaticBatchDirty?.();
+        else this._scene?.markRenderDirty?.();
     }
 
     get polygons() {
@@ -234,6 +253,9 @@ export class Mesh {
         this.lazyTopology = false;
         this._staticPolygonProxy = null;
         this._setPolygonViews(this.faces.map(face => face.map(vertexIndex => this.positions[vertexIndex])));
+        while (this.faceUvTransforms.length < this.faces.length) {
+            this.faceUvTransforms.push({ scale: [1, 1], offset: [0, 0], rotation: 0, flipX: false, flipY: false });
+        }
         this._rebuildTopologyAdjacency();
         return this._polygonProxy;
     }
@@ -281,15 +303,18 @@ export class Mesh {
         this._faceColors = faceColors;
         this.staticOptimized = true;
         this._staticPolygonProxy = null;
-        this.positions.forEach((position, index) => this.vertexIndexByPosition.set(position, index));
+        // Keep the editable maps lazy. The renderer only needs raw positions/faces here;
+        // materializing WeakMap/adjacency data for a city-sized static mesh wastes startup time.
+        this.vertexIndexByPosition = new WeakMap();
         this.faceCount = faces.length;
         this.allFaceIndices = Array.from({ length: this.faceCount }, (_, index) => index);
         this.opaqueFaceIndices = this.allFaceIndices;
         this.transparentFaceIndices = [];
         this.faceTextures = [];
         this.faceTextureIds = [];
-        const uvDefault = { scale: [1, 1], offset: [0, 0], rotation: 0, flipX: false, flipY: false };
-        this.faceUvTransforms = Array.from({ length: this.faceCount }, () => ({ ...uvDefault, scale: [1, 1], offset: [0, 0] }));
+        // Untextured static geometry does not need per-face UV transform objects.
+        // They are created on demand if the mesh is later made editable.
+        this.faceUvTransforms = [];
         this.faceUvs = [];
         this.edges = [];
         this.facesOfEdge = new Map();
@@ -305,6 +330,12 @@ export class Mesh {
         this._polygonProxy = null;
         this.vertexIndexByPosition = new WeakMap();
         this._buildStaticRenderData();
+        if (this.material && !this.material.doubleSided && hasStrongMixedWinding(this.positions, this.faces)) {
+            // Imported assets occasionally contain a handful of reversed polygons.
+            // Treat only those meshes as double-sided instead of globally disabling
+            // back-face culling and paying the fill-rate cost everywhere.
+            this.material.doubleSided = true;
+        }
         this.dirtyFlags.geometry = false;
         this.dirtyFlags.uvs = false;
         this.dirtyFlags.materials = false;
@@ -323,6 +354,9 @@ export class Mesh {
         this.staticOptimized = false;
         this.lazyTopology = true;
         this.bakeFaceColors = !!bakeFaceColors;
+        if (this.material && !this.material.doubleSided && hasStrongMixedWinding(this._positions, this._faces)) {
+            this.material.doubleSided = true;
+        }
         this._polygonViews = [];
         this._polygonProxy = null;
         this._staticPolygonProxy = null;
@@ -1540,8 +1574,6 @@ export class Mesh {
         this.wireframeIndices = wireframeIndices;
         this.indexType = IndexArray === Uint32Array ? 'UNSIGNED_INT' : 'UNSIGNED_SHORT';
         this.indexBytes = IndexArray === Uint32Array ? 4 : 2;
-        this.indexType = IndexArray === Uint32Array ? 'UNSIGNED_INT' : 'UNSIGNED_SHORT';
-        this.indexBytes = IndexArray === Uint32Array ? 4 : 2;
         this.triangleCount = triangleIndexCount / 3;
         this.boundsMin = boundsMin[0] === Infinity ? null : boundsMin;
         this.boundsMax = boundsMax[0] === -Infinity ? null : boundsMax;
@@ -1564,21 +1596,11 @@ export class Mesh {
             this.boundsRadius = 0;
         }
         this.geometrySignature = `static:${renderVertexCount}:${triangleIndexCount}:${this.faceCount}`;
+        // Editor-only render-to-source maps remain empty until a static mesh is materialized.
         this.renderVertexSharedIndices = [];
-        this.renderVertexOffsetsByShared = Array.from({ length: this.positions.length }, () => []);
+        this.renderVertexOffsetsByShared = [];
         this.renderVertexFaceIndex = [];
-        this.faceVertexRanges = new Array(faces.length);
-        let staticCursor = 0;
-        for (let faceIndex = 0; faceIndex < faces.length; faceIndex++) {
-            const face = faces[faceIndex] || [];
-            this.faceVertexRanges[faceIndex] = { start: staticCursor, count: face.length };
-            face.forEach(sharedIndex => {
-                this.renderVertexSharedIndices.push(sharedIndex);
-                this.renderVertexOffsetsByShared[sharedIndex]?.push(staticCursor);
-                this.renderVertexFaceIndex.push(faceIndex);
-                staticCursor++;
-            });
-        }
+        this.faceVertexRanges = [];
         this.renderStateVersion++;
         this.renderDataRevision = (this.renderDataRevision || 0) + 1;
         this.bakedFaceColorsRevision = this.renderDataRevision;
@@ -1703,6 +1725,13 @@ export class Mesh {
         this.normalBuffer = null;
         this.colorBuffer = null;
         this.uvBuffer = null;
+        this.indexBuffer = null;
+        if (this._instancedRendererVAO) {
+            // Renderer-owned instanced VAOs point at these buffers. The renderer
+            // will recreate them lazily the next time the mesh is drawn.
+            this._instancedRendererVAO = null;
+            this._instancedRendererVAOExt = null;
+        }
         this.indexType = null;
         this.indexBytes = 2;
     }
@@ -1756,6 +1785,7 @@ export class Mesh {
         gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 0, 0);
 
         const ibo = gl.createBuffer();
+        this.indexBuffer = ibo;
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
         const IndexArray = this.indices instanceof Uint32Array ? Uint32Array : Uint16Array;
         if (IndexArray === Uint32Array && !gl.getExtension('OES_element_index_uint')) {
@@ -1773,6 +1803,34 @@ export class Mesh {
         } else {
             this.vaoExtension.bindVertexArrayOES(null);
         }
+    }
+
+    getWorldBounds() {
+        this.refreshBounds();
+        if (!this._worldBounds) this._worldBounds = { center: new Float32Array(3), radius: 0 };
+        if (this._worldBoundsRevision === this.transformRevision && this._worldBoundsGeometryRevision === this.renderDataRevision) return this._worldBounds;
+        const center = this.boundsCenter;
+        if (!center || !this.boundsRadius) {
+            this._worldBounds.center[0] = this.position[0];
+            this._worldBounds.center[1] = this.position[1];
+            this._worldBounds.center[2] = this.position[2];
+            this._worldBounds.radius = 0;
+            this._worldBoundsRevision = this.transformRevision;
+            this._worldBoundsGeometryRevision = this.renderDataRevision;
+            return this._worldBounds;
+        }
+        const model = this.getModelMatrix();
+        const c = this._worldBounds.center;
+        c[0] = model[0] * center[0] + model[4] * center[1] + model[8] * center[2] + model[12];
+        c[1] = model[1] * center[0] + model[5] * center[1] + model[9] * center[2] + model[13];
+        c[2] = model[2] * center[0] + model[6] * center[1] + model[10] * center[2] + model[14];
+        const sx = Math.hypot(model[0], model[1], model[2]);
+        const sy = Math.hypot(model[4], model[5], model[6]);
+        const sz = Math.hypot(model[8], model[9], model[10]);
+        this._worldBounds.radius = (Number(this.boundsRadius) || 0) * Math.max(sx, sy, sz, 1e-6) * 1.04;
+        this._worldBoundsRevision = this.transformRevision;
+        this._worldBoundsGeometryRevision = this.renderDataRevision;
+        return this._worldBounds;
     }
 
     getModelMatrix() {
@@ -1999,6 +2057,49 @@ function observeTransformArray(value, onChange) {
             return result;
         }
     });
+}
+
+function hasStrongMixedWinding(positions, faces) {
+    if (!positions?.length || !faces?.length || faces.length < 4) return false;
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (const p of positions) {
+        if (!p) continue;
+        minX = Math.min(minX, p[0] || 0); minY = Math.min(minY, p[1] || 0); minZ = Math.min(minZ, p[2] || 0);
+        maxX = Math.max(maxX, p[0] || 0); maxY = Math.max(maxY, p[1] || 0); maxZ = Math.max(maxZ, p[2] || 0);
+    }
+    if (!Number.isFinite(minX)) return false;
+    const center = [(minX + maxX) * 0.5, (minY + maxY) * 0.5, (minZ + maxZ) * 0.5];
+    let positive = 0, negative = 0, usable = 0;
+    const sampleStride = Math.max(1, Math.floor(faces.length / 2048));
+    for (let faceIndex = 0; faceIndex < faces.length; faceIndex += sampleStride) {
+        const face = faces[faceIndex];
+        if (!face || face.length < 3) continue;
+        const a = positions[face[0]], b = positions[face[1]], c = positions[face[2]];
+        if (!a || !b || !c) continue;
+        const ax = b[0]-a[0], ay = b[1]-a[1], az = b[2]-a[2];
+        const bx = c[0]-a[0], by = c[1]-a[1], bz = c[2]-a[2];
+        const nx = ay*bz-az*by, ny = az*bx-ax*bz, nz = ax*by-ay*bx;
+        const areaSq = nx*nx+ny*ny+nz*nz;
+        if (areaSq < 1e-12) continue;
+        let fx = 0, fy = 0, fz = 0;
+        for (const index of face) { const p = positions[index]; if (p) { fx += p[0]; fy += p[1]; fz += p[2]; } }
+        const inv = 1 / face.length; fx *= inv; fy *= inv; fz *= inv;
+        const dot = nx*(fx-center[0]) + ny*(fy-center[1]) + nz*(fz-center[2]);
+        const tolerance = Math.sqrt(areaSq) * 1e-5;
+        if (dot > tolerance) positive++;
+        else if (dot < -tolerance) negative++;
+        usable++;
+    }
+    if (usable < 8) return false;
+    const minority = Math.min(positive, negative);
+    // OBJ does not encode a face-culling preference. A component that is
+    // consistently wound inward is just as dangerous as mixed winding: with
+    // back-face culling it can vanish from the outside while collision remains.
+    // Preserve normal culling for the common outward-wound case, but make
+    // clearly inward-only imported geometry safe by rendering it double-sided.
+    const stronglyInward = negative / usable >= 0.95 && positive <= Math.max(1, usable * 0.02);
+    return stronglyInward || (minority >= 3 && minority / usable >= 0.05);
 }
 
 function observeArrays(value, onChange) {
